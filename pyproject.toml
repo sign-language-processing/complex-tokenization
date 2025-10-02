@@ -1,0 +1,46 @@
+[project]
+name = "complex-tokenization"
+description = "Tokenizaion for Complex Scripts"
+version = "0.0.1"
+authors = [
+    { name = "Amit Moryossef", email = "amitmoryossef@gmail.com" },
+]
+readme = "README.md"
+dependencies = [
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff",
+    "pytest",
+    "pytest-xdist", # For parallel test execution
+]
+
+
+[tool.setuptools]
+packages = [
+    "complex_tokenization",
+    "complex_tokenization.chinese",
+]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E", # pycodestyle errors
+    "W", # pycodestyle warnings
+    "F", # pyflakes
+    "C90", # mccabe complexity
+    "I", # isort
+    "N", # pep8-naming
+    "UP", # pyupgrade
+    "B", # flake8-bugbear
+    "PT", # flake8-pytest-style
+    "W605", # invalid escape sequence
+    "BLE", # flake8-blind-except
+]
+
+[tool.pytest.ini_options]
+addopts = "-v"
+testpaths = ["complex_tokenization", "tests"]
