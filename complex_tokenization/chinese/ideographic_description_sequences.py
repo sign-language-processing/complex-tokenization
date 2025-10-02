@@ -23,8 +23,9 @@ Ternary IDCs (take 3 components):
 """
 
 from dataclasses import dataclass
-
-from tqdm import tqdm
+from functools import cache
+import json
+from pathlib import Path
 
 # IDCs that take 2 components
 BINARY_IDCS = set('⿰⿱⿴⿵⿶⿷⿸⿹⿺⿻')
@@ -153,12 +154,28 @@ def ids_tree_to_string(node: IDSNode, prefix: str = "", is_last: bool = True) ->
 
     return result
 
-
-if __name__ == "__main__":
-    # Test examples
-    import json
-    with open("dictionary.json") as f:
+@cache
+def load_characters_dictionary():
+    """Load the IDS dictionary from the JSON file."""
+    dictionary_path = Path(__file__).parent / "dictionary.json"
+    with open(dictionary_path, encoding='utf-8') as f:
         dictionary = json.load(f)
-    templates = list(dictionary.values())
-    for template in tqdm(templates):
-        parse_ideographic_description_sequences(template)
+    return dictionary
+
+@cache
+def reversed_characters_dictionary():
+    """Load the reversed IDS dictionary from the JSON file."""
+    dictionary = load_characters_dictionary()
+    reversed_dict = {v: k for k, v in dictionary.items()}
+    return reversed_dict
+
+
+def get_ids_for_character(char: str) -> str:
+    """Get the IDS for a given character from the dictionary."""
+    dictionary = load_characters_dictionary()
+    return dictionary.get(char)
+
+def get_character_for_ids(ids: str) -> str | None:
+    """Get the character for a given IDS from the reversed dictionary."""
+    reversed_dict = reversed_characters_dictionary()
+    return reversed_dict.get(ids, None)
