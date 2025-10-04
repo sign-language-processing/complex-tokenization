@@ -40,31 +40,42 @@ def extract_chinese_characters(text: str) -> list[str]:
     return [char for char in text if is_chinese_character(char)]
 
 
-def find_near_leaf_nodes(node: IDSNode) -> list[tuple[str, ...]]:
+def linearize_preorder(node: IDSNode) -> tuple[str, ...]:
     """
-    Find all near-leaf nodes in the tree.
+    Linearize a subtree in preorder (node, then children).
+    Returns a tuple of values.
+    """
+    if node.is_leaf():
+        return (node.value,)
 
-    A near-leaf node is a node whose children are all leaf nodes.
-    Returns a list of tuples (node_value, child1_value, child2_value, ...)
+    result = [node.value]
+    for child in node.children:
+        result.extend(linearize_preorder(child))
+    return tuple(result)
+
+
+def find_all_subtree_patterns(node: IDSNode) -> list[tuple[str, ...]]:
     """
-    near_leaf_patterns = []
+    Find all non-leaf subtrees in the tree and linearize them in preorder.
+    Returns a list of tuples representing each subtree's preorder traversal.
+    """
+    patterns = []
 
     def traverse(node: IDSNode):
         if node.is_leaf():
             return
 
-        # Check if all children are leaves
-        if all(child.is_leaf() for child in node.children):
-            # This is a near-leaf node
-            pattern = tuple([node.value] + [child.value for child in node.children])
-            near_leaf_patterns.append(pattern)
+        # Linearize this subtree
+        # if all(child.is_leaf() for child in node.children):
+        pattern = linearize_preorder(node)
+        patterns.append(pattern)
 
-        # Continue traversing
+        # Continue traversing to find all subtrees
         for child in node.children:
             traverse(child)
 
     traverse(node)
-    return near_leaf_patterns
+    return patterns
 
 
 def main():
@@ -84,8 +95,8 @@ def main():
     print(f"\nTotal unique characters found: {len(character_counter)}")
     print(f"Total character occurrences: {sum(character_counter.values())}")
 
-    print("\nDecomposing characters and analyzing near-leaf patterns...")
-    near_leaf_counter = Counter()
+    print("\nDecomposing characters and analyzing all subtree patterns...")
+    pattern_counter = Counter()
     characters_processed = 0
     characters_with_ids = 0
 
@@ -103,36 +114,36 @@ def main():
             # Parse IDS into tree
             tree = parse_ideographic_description_sequences(ids)
 
-            # Find near-leaf nodes
-            patterns = find_near_leaf_nodes(tree)
+            # Find all subtree patterns
+            patterns = find_all_subtree_patterns(tree)
 
             # Count patterns weighted by character frequency
             for pattern in patterns:
-                near_leaf_counter[pattern] += freq
+                pattern_counter[pattern] += freq
         except Exception as e:
             # Skip characters that fail to parse
             pass
 
     print(f"\nCharacters processed: {characters_processed}")
     print(f"Characters with IDS: {characters_with_ids}")
-    print(f"Unique near-leaf patterns found: {len(near_leaf_counter)}")
+    print(f"Unique subtree patterns found: {len(pattern_counter)}")
 
     # Print most common patterns
     print("\n" + "="*80)
-    print("MOST COMMON NEAR-LEAF PATTERNS")
+    print("MOST COMMON SUBTREE PATTERNS (sorted by compression = price * frequency)")
     print("="*80)
     print(f"{'Rank':<6} {'Compression':<15} {'Frequency':<15} {'Pattern':<8} {'Character (if Exists)'}")
     print("-"*80)
 
-    pricing = Counter({pattern: len(pattern) * count for pattern, count in near_leaf_counter.items()})
+    pricing = Counter({pattern: len(pattern) * count for pattern, count in pattern_counter.items()})
 
     for rank, (pattern, price) in enumerate(pricing.most_common(50), 1):
-        freq = near_leaf_counter[pattern]
+        freq = pattern_counter[pattern]
         pattern_str = "".join(pattern)
         print(f"{rank:<6} {price:<15,} {freq:<15,} {pattern_str:<8} {get_character_for_ids(pattern_str)}")
 
     # Calculate coverage
-    total_pattern_frequency = sum(near_leaf_counter.values())
+    total_pattern_frequency = sum(pattern_counter.values())
     total_char_frequency = sum(character_counter.values())
     coverage = (total_pattern_frequency / total_char_frequency) * 100 if total_char_frequency > 0 else 0
 

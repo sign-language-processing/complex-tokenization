@@ -63,7 +63,7 @@ def load_canonicalization_rules(canonicalize_path):
 
             rule_type = parts[0]
             source = parts[1]
-            target = parts[2].replace("~", "") # Remove any '~' characters
+            target = parts[2].replace("~", "")  # Remove any '~' characters
 
             # Only apply certain rule types for normalization
             if rule_type in ['identical', 'variant', 'print', 'preferred']:
@@ -85,9 +85,21 @@ def canonicalize_dictionary(dictionary, canonicalization_rules):
         canonical_value = ""
         for char in value:
             canonical_value += canonicalization_rules.get(char, char)
-        canonicalized[key] = canonical_value
+        if key != canonical_value:
+            canonicalized[key] = canonical_value
 
     return canonicalized
+
+
+def expand_ids(value, dictionary):
+    expanded_value = ""
+    for char in value:
+        if char in dictionary:
+            dictionary[char] = expand_ids(dictionary[char], dictionary)
+            expanded_value += dictionary[char]
+        else:
+            expanded_value += char
+    return expanded_value
 
 
 def expand_dictionary(dictionary):
@@ -99,13 +111,7 @@ def expand_dictionary(dictionary):
         if "{" in value:
             continue
 
-        expanded_value = ""
-        for char in value:
-            if char in dictionary:
-                expanded_value += dictionary[char]
-            else:
-                expanded_value += char
-        expanded[key] = expanded_value
+        expanded[key] = expand_ids(value, dictionary)
 
     return expanded
 
