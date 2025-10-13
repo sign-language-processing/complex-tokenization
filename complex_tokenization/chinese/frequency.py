@@ -66,9 +66,9 @@ def find_all_subtree_patterns(node: IDSNode) -> list[tuple[str, ...]]:
             return
 
         # Linearize this subtree
-        # if all(child.is_leaf() for child in node.children):
-        pattern = linearize_preorder(node)
-        patterns.append(pattern)
+        if all(child.is_leaf() for child in node.children):
+            pattern = linearize_preorder(node)
+            patterns.append(pattern)
 
         # Continue traversing to find all subtrees
         for child in node.children:
