@@ -1,10 +1,8 @@
-import re
 from dataclasses import dataclass
-from functools import reduce
-from typing import Iterable, Counter, Iterator
+from typing import Iterable, Iterator
 
 from complex_tokenization.chinese.ideographic_description_sequences import get_character_for_ids
-from complex_tokenization.draw import draw_dot_content, create_gif
+from complex_tokenization.pretokenizer import pretokenize
 
 
 def dot_escape(s: str) -> str:
@@ -13,15 +11,18 @@ def dot_escape(s: str) -> str:
         .replace('"', '\\"') \
         .replace("\n", "\\n")
 
-USE_SINGLETONS = True # speeds up computation but hurts visualization
-MAX_MERGE_SIZE = 3
-ONLY_MINIMAL_MERGES = True
+
+class GraphSettings:
+    USE_SINGLETONS = False  # speeds up computation but hurts visualization
+    MAX_MERGE_SIZE = 3
+    ONLY_MINIMAL_MERGES = True
+
 
 class GraphVertex:
-    _instances = {} # Singleton pattern
+    _instances = {}  # Singleton pattern
 
     def __new__(cls, *args, **kwargs):
-        if not USE_SINGLETONS:
+        if not GraphSettings.USE_SINGLETONS:
             return super().__new__(cls)
 
         key = (args, tuple(sorted(kwargs.items())))
@@ -58,6 +59,7 @@ class GraphVertex:
 
     def merge(self, token, merge):
         raise NotImplementedError
+
 
 @dataclass(frozen=True, slots=True)
 class Node(GraphVertex):
@@ -101,18 +103,15 @@ class NodesSequence(GraphVertex):
         return self.nodes[0].oid
 
     def get_merges(self):
-        for node in self.nodes:
+        num_nodes = len(self.nodes)
+        for i, node in enumerate(self.nodes):
             yield from node.get_merges()
 
-        # # TODO this only does pairs
-        # for node1, node2 in zip(self.nodes, self.nodes[1:]):
-        #     yield node1, node2
+            if GraphSettings.ONLY_MINIMAL_MERGES and not isinstance(node, Node):
+                break
 
-        # up to MAX_MERGE_SIZE
-        num_nodes = len(self.nodes)
-        for i in range(num_nodes):
-            for j in range(i+2, min(i + MAX_MERGE_SIZE + 1, num_nodes + 1)):
-                if ONLY_MINIMAL_MERGES and j < num_nodes and not isinstance(self.nodes[j], Node):
+            for j in range(i + 2, min(i + GraphSettings.MAX_MERGE_SIZE + 1, num_nodes + 1)):
+                if GraphSettings.ONLY_MINIMAL_MERGES and j < num_nodes and not isinstance(self.nodes[j], Node):
                     break
                 yield tuple(self.nodes[i:j])
 
@@ -152,7 +151,7 @@ class NodesSequence(GraphVertex):
         yield ''
         last_node = None
         for node in self.nodes:
-            yield f'\t{"".join(node.dot(level+1))}'
+            yield f'\t{"".join(node.dot(level + 1))}'
             if last_node is not None:
                 yield f'\t{last_node.oid} -> {node.oid};'
             last_node = node
@@ -219,56 +218,16 @@ class Tree(GraphVertex):
 
 def utf8(s: str) -> NodesSequence:
     bytes_array = s.encode("utf-8")
-    nodes = [Node(bytes([b])) for b in bytes_array]
+    return Node(bytes_array)
+    nodes = [Node(bytes([b])) for b in bytes_array] # TODO each grapheme cluster should be a list
     if len(nodes) == 1:
         return nodes[0]
     return NodesSequence(nodes=tuple(nodes))
 
-def sentence_to_graph(sentence: str) -> NodesSequence:
-    words = re.split(r'(\s+)', sentence)
+
+def text_to_graph(text: str) -> NodesSequence:
+    words = pretokenize(text)
     nodes = [utf8(word) for word in words]
     if len(nodes) == 1:
         return nodes[0]
     return NodesSequence(nodes=tuple(nodes))
-
-if __name__ == "__main__":
-    example_graph = Tree(root=utf8("⿱"), children=(
-        utf8("十"),
-        Tree(root=utf8("⿱"), children=(
-            utf8("乛"),
-            utf8("头"),
-        )),
-    ))
-    # example_sentence = "the teacher teaches the thick."
-    example_sentence = "test test"
-    # example_graph = sentence_to_graph(example_sentence)
-
-    other_graph = sentence_to_graph(example_sentence)
-    example_graph = NodesSequence((example_graph, utf8(" "), other_graph))
-
-    frames = []
-    while True:
-        dot_content = "\n".join(example_graph.dot())
-        image = draw_dot_content(dot_content)
-        frames.append(image)
-
-        all_merges = example_graph.get_merges()
-        if ONLY_MINIMAL_MERGES:
-            all_merges = (m for m in all_merges if all(isinstance(n, Node) for n in m))
-        merges = Counter(all_merges)
-        merges_compression = Counter({k: len(k) * v for k, v in merges.items()})
-
-        print(merges_compression.most_common(5))
-
-        if len(merges) == 0:
-            break
-        nodes = merges_compression.most_common(1)[0][0]
-        token = reduce(lambda x, y: x + y, nodes)
-
-        print("Merging", token, "=", nodes)
-
-        example_graph = example_graph.merge(token, nodes)
-
-    gif = create_gif(frames, save="example.gif")
-    gif.show()
-
