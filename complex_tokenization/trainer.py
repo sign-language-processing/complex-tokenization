@@ -2,7 +2,9 @@ from functools import reduce
 from typing import Counter
 
 from complex_tokenization.draw import draw_dot_content, create_gif
-from complex_tokenization.graph import GraphVertex, Node, Tree, utf8, text_to_graph, NodesSequence, GraphSettings
+from complex_tokenization.graph import GraphVertex, Node, Tree
+from complex_tokenization.graphs.settings import GraphSettings
+from complex_tokenization.graphs.utf8 import utf8
 
 
 class Trainer:
@@ -10,7 +12,7 @@ class Trainer:
         self.graph = graph
         self.merges = []
 
-    def train(self, num_merges: int = 100, draw=False):
+    def train(self, num_merges: int = 100, draw=False, verbose=False):
         frames = []
 
         while True:
@@ -28,14 +30,16 @@ class Trainer:
             merges = Counter(all_merges)
             merges_compression = Counter({k: (len(k) - 1) * v for k, v in merges.items()})
 
-            print(merges_compression.most_common(5))
+            if verbose:
+                print(merges_compression.most_common(5))
 
             if len(merges) == 0:
                 break
             nodes = merges_compression.most_common(1)[0][0]
             token = reduce(lambda x, y: x + y, nodes)
 
-            print("Merging", token, "=", nodes)
+            if verbose:
+                print("Merging", token, "=", nodes)
 
             self.graph = self.graph.merge(token, nodes)
             self.merges.append((token, nodes))
@@ -43,6 +47,9 @@ class Trainer:
         if draw:
             gif = create_gif(frames, save="example.gif")
             gif.show()
+
+    def get_merges(self):
+        return [tuple(str(node) for node in nodes) for _, nodes in self.merges]
 
 
 if __name__ == "__main__":
@@ -57,7 +64,7 @@ if __name__ == "__main__":
     example_sentence = "test test"
     # example_graph = sentence_to_graph(example_sentence)
 
-    # other_graph = text_to_graph(example_sentence)
+    # other_graph = words(example_sentence)
     # example_graph = NodesSequence((example_graph, utf8(" "), other_graph))
 
     trainer = Trainer(graph=example_graph)

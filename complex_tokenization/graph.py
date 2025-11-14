@@ -1,8 +1,8 @@
 from dataclasses import dataclass
 from typing import Iterable, Iterator
 
-from complex_tokenization.chinese.ideographic_description_sequences import get_character_for_ids
-from complex_tokenization.pretokenizer import pretokenize
+from complex_tokenization.graphs.settings import GraphSettings
+from complex_tokenization.languages.chinese.ideographic_description_sequences import get_character_for_ids
 
 
 def dot_escape(s: str) -> str:
@@ -12,10 +12,6 @@ def dot_escape(s: str) -> str:
         .replace("\n", "\\n")
 
 
-class GraphSettings:
-    USE_SINGLETONS = False  # speeds up computation but hurts visualization
-    MAX_MERGE_SIZE = 3
-    ONLY_MINIMAL_MERGES = True
 
 
 class GraphVertex:
@@ -57,7 +53,7 @@ class GraphVertex:
     def get_merges(self) -> list[str] | Iterator[tuple[str, ...]]:
         return []
 
-    def merge(self, token, merge):
+    def merge(self, token, merge) -> "GraphVertex":
         raise NotImplementedError
 
 
@@ -108,7 +104,7 @@ class NodesSequence(GraphVertex):
             yield from node.get_merges()
 
             if GraphSettings.ONLY_MINIMAL_MERGES and not isinstance(node, Node):
-                break
+                continue
 
             for j in range(i + 2, min(i + GraphSettings.MAX_MERGE_SIZE + 1, num_nodes + 1)):
                 if GraphSettings.ONLY_MINIMAL_MERGES and j < num_nodes and not isinstance(self.nodes[j], Node):
@@ -216,18 +212,26 @@ class Tree(GraphVertex):
         return self_bytes
 
 
-def utf8(s: str) -> NodesSequence:
-    bytes_array = s.encode("utf-8")
-    return Node(bytes_array)
-    nodes = [Node(bytes([b])) for b in bytes_array] # TODO each grapheme cluster should be a list
-    if len(nodes) == 1:
-        return nodes[0]
-    return NodesSequence(nodes=tuple(nodes))
+@dataclass(frozen=True, slots=True)
+class UnconnectedGraphs(GraphVertex):
+    subgraphs: tuple[GraphVertex, ...]
+
+    def __bytes__(self):
+        raise Exception("Cannot convert UnconnectedGraphs to bytes")
+
+    def merge(self, token: Node, merge: tuple):
+        subgraphs = tuple(subgraph.merge(token, merge) for subgraph in self.subgraphs)
+        return UnconnectedGraphs(subgraphs=subgraphs)
+
+    def get_merges(self) -> Iterator[tuple]:
+        for subgraph in self.subgraphs:
+            yield from subgraph.get_merges()
+
+    def dot(self, level=0) -> Iterable[str]:
+        for subgraph in self.subgraphs:
+            yield from subgraph.dot(level)
 
 
-def text_to_graph(text: str) -> NodesSequence:
-    words = pretokenize(text)
-    nodes = [utf8(word) for word in words]
-    if len(nodes) == 1:
-        return nodes[0]
-    return NodesSequence(nodes=tuple(nodes))
+
+
+

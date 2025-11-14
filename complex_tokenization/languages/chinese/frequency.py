@@ -13,7 +13,7 @@ from collections import Counter
 from datasets import load_dataset
 from tqdm import tqdm
 
-from complex_tokenization.chinese.ideographic_description_sequences import (
+from complex_tokenization.languages.chinese.ideographic_description_sequences import (
     get_ids_for_character,
     parse_ideographic_description_sequences,
     IDSNode, get_character_for_ids

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from complex_tokenization.chinese.ideographic_description_sequences import (
+from complex_tokenization.languages.chinese.ideographic_description_sequences import (
     ids_tree_to_string,
     parse_ideographic_description_sequences,
 )
