@@ -18,11 +18,9 @@ dev = [
 ]
 
 
-[tool.setuptools]
-packages = [
-    "complex_tokenization",
-    "complex_tokenization.chinese",
-]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["complex_tokenization*"]
 
 [tool.ruff]
 line-length = 120
