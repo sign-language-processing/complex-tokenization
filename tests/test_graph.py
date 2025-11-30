@@ -1,8 +1,8 @@
 from collections import Counter
 
-from complex_tokenization.graph import GraphVertex, NodesSequence, Node
+from complex_tokenization.graph import GraphVertex, Node, NodesSequence
 from complex_tokenization.graphs.settings import GraphSettings
-from complex_tokenization.graphs.utf8 import utf8, utf8_clusters
+from complex_tokenization.graphs.units import characters, utf8, utf8_clusters
 from complex_tokenization.graphs.words import words
 
 
@@ -15,7 +15,23 @@ def readable_merges(graph: GraphVertex):
     return byte_merges
 
 
-class TestUTF8Word:
+class TestUnitsWord:
+    def test_characters_split(self):
+        assert characters("שלום") == NodesSequence((Node("ש"), Node("ל"), Node("ו"), Node("ם")))
+
+    def test_utf8_split(self):
+        assert utf8("שלום") == NodesSequence((Node(value=b'\xd7'), Node(value=b'\xa9'),
+                                              Node(value=b'\xd7'), Node(value=b'\x9c'),
+                                              Node(value=b'\xd7'), Node(value=b'\x95'),
+                                              Node(value=b'\xd7'), Node(value=b'\x9d')))
+
+    def test_utf8_clusters_split(self):
+        assert utf8_clusters("שלום") == NodesSequence((
+            NodesSequence((Node(value=b'\xd7'), Node(value=b'\xa9'))),
+            NodesSequence((Node(value=b'\xd7'), Node(value=b'\x9c'))),
+            NodesSequence((Node(value=b'\xd7'), Node(value=b'\x95'))),
+            NodesSequence((Node(value=b'\xd7'), Node(value=b'\x9d')))))
+
     def test_utf8_ascii_same_as_cluster(self):
         assert utf8_clusters('word') == utf8('word')
 
@@ -64,10 +80,10 @@ class TestUTF8Word:
 
         print(merges)
         # Only character sequences should be valid
-        assert merges['ש'.encode('utf-8')] == 1
-        assert merges['ל'.encode('utf-8')] == 1
-        assert merges['ו'.encode('utf-8')] == 1
-        assert merges['ם'.encode('utf-8')] == 1
+        assert merges['ש'.encode()] == 1
+        assert merges['ל'.encode()] == 1
+        assert merges['ו'.encode()] == 1
+        assert merges['ם'.encode()] == 1
 
     def test_utf8_cluster_non_minimal_merges(self):
         GraphSettings.MAX_MERGE_SIZE = 100
@@ -76,16 +92,16 @@ class TestUTF8Word:
         merges = readable_merges(graph)
 
         # Basically, every subsequence is valid
-        assert merges['ש'.encode('utf-8')] == 1
-        assert merges['ל'.encode('utf-8')] == 1
-        assert merges['ו'.encode('utf-8')] == 1
-        assert merges['ם'.encode('utf-8')] == 1
-        assert merges['של'.encode('utf-8')] == 1
-        assert merges['שלו'.encode('utf-8')] == 1
-        assert merges['שלום'.encode('utf-8')] == 1
-        assert merges['לו'.encode('utf-8')] == 1
-        assert merges['לום'.encode('utf-8')] == 1
-        assert merges['ום'.encode('utf-8')] == 1
+        assert merges['ש'.encode()] == 1
+        assert merges['ל'.encode()] == 1
+        assert merges['ו'.encode()] == 1
+        assert merges['ם'.encode()] == 1
+        assert merges['של'.encode()] == 1
+        assert merges['שלו'.encode()] == 1
+        assert merges['שלום'.encode()] == 1
+        assert merges['לו'.encode()] == 1
+        assert merges['לום'.encode()] == 1
+        assert merges['ום'.encode()] == 1
 
 
 class TestWords:

@@ -1,6 +1,14 @@
 import regex
 
-from complex_tokenization.graph import NodesSequence, Node, GraphVertex
+from complex_tokenization.graph import GraphVertex, Node, NodesSequence
+
+
+def characters(s: str) -> GraphVertex:
+    nodes = [Node(c) for c in s]
+
+    if len(nodes) == 1:
+        return nodes[0]
+    return NodesSequence(nodes=tuple(nodes))
 
 
 def utf8(s: str) -> GraphVertex:

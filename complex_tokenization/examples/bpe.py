@@ -1,12 +1,9 @@
 import json
 
 from tokenizers import Tokenizer
-from tqdm import tqdm
 
 from complex_tokenization.examples.bne import train_bne_tokenizer
 from complex_tokenization.examples.utils import text_dataset
-from complex_tokenization.graph import GraphSettings, UnconnectedGraphs
-from complex_tokenization.graphs.words import words
 
 
 def get_tokenizer_merges(tokenizer: Tokenizer):

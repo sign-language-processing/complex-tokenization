@@ -1,7 +1,7 @@
-from graphviz import Source
-
-from PIL import Image
 from io import BytesIO
+
+from graphviz import Source
+from PIL import Image
 
 
 def draw_dot_content(dot_content: str) -> Image:

@@ -10,13 +10,15 @@ This script:
 """
 
 from collections import Counter
+
 from datasets import load_dataset
 from tqdm import tqdm
 
 from complex_tokenization.languages.chinese.ideographic_description_sequences import (
+    IDSNode,
+    get_character_for_ids,
     get_ids_for_character,
     parse_ideographic_description_sequences,
-    IDSNode, get_character_for_ids
 )
 
 
@@ -120,8 +122,8 @@ def main():
             # Count patterns weighted by character frequency
             for pattern in patterns:
                 pattern_counter[pattern] += freq
-        except Exception as e:
-            # Skip characters that fail to parse
+        except Exception:  # noqa: BLE001
+            # Skip characters that fail to parse (various parsing errors possible from IDS data)
             pass
 
     print(f"\nCharacters processed: {characters_processed}")

@@ -1,5 +1,5 @@
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
-from typing import Iterable, Iterator
 
 from complex_tokenization.graphs.settings import GraphSettings
 from complex_tokenization.languages.chinese.ideographic_description_sequences import get_character_for_ids

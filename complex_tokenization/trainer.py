@@ -1,14 +1,22 @@
+from collections import Counter
 from functools import reduce
-from typing import Counter
 
-from complex_tokenization.draw import draw_dot_content, create_gif
-from complex_tokenization.graph import GraphVertex, Node, Tree
+from complex_tokenization.draw import create_gif, draw_dot_content
+from complex_tokenization.graph import GraphVertex, Node, Tree, UnconnectedGraphs
 from complex_tokenization.graphs.settings import GraphSettings
-from complex_tokenization.graphs.utf8 import utf8
+from complex_tokenization.graphs.units import utf8
 
 
 class Trainer:
-    def __init__(self, graph=GraphVertex):
+    def __init__(self, graph: GraphVertex | None = None, graphs: tuple[GraphVertex, ...] | None = None):
+        if graphs is None and graph is None:
+            raise ValueError("Must provide either graph or graphs")
+        if graphs is not None and graph is not None:
+            raise ValueError("Must provide either graph or graphs, not both")
+
+        if graphs is not None:
+            graph = UnconnectedGraphs(graphs)
+
         self.graph = graph
         self.merges = []
 

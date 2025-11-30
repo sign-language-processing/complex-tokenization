@@ -22,9 +22,9 @@ Ternary IDCs (take 3 components):
 ⿳ (U+2FF3) - above to middle to below
 """
 
+import json
 from dataclasses import dataclass
 from functools import cache
-import json
 from pathlib import Path
 
 # IDCs that take 2 components
