@@ -76,4 +76,4 @@ class TestTrainer:
     def test_characters_non_ascii_produce_valid_bytes(self):
         from complex_tokenization.graphs.units import characters
         graph = characters("שלום")
-        assert bytes(graph) == "שלום".encode("utf-8")
+        assert bytes(graph) == "שלום".encode()

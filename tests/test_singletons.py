@@ -1,4 +1,4 @@
-from complex_tokenization.graph import GraphVertex, Node, NodesSequence
+from complex_tokenization.graph import Node, NodesSequence
 from complex_tokenization.graphs.settings import GraphSettings
 from complex_tokenization.graphs.units import utf8
 

@@ -11,10 +11,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+examples = [
+    "datasets",
+    "tokenizers",
+    "transformers",
+]
 dev = [
     "ruff",
     "pytest",
+    "pytest-timeout",
     "pytest-xdist", # For parallel test execution
+    "complex-tokenization[examples]",
 ]
 
 
@@ -43,3 +50,4 @@ select = [
 [tool.pytest.ini_options]
 addopts = "-v"
 testpaths = ["complex_tokenization", "tests"]
+timeout = 300
