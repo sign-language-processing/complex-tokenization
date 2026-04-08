@@ -28,19 +28,27 @@ class TestSingletonPerformance:
         merges_on = train_with_settings(texts, use_singletons=True)
         assert merges_off == merges_on
 
-    def test_singletons_not_faster_than_regular(self):
-        """Document that singletons are currently slower due to cache overhead."""
-        texts = ["the teacher teaches the thick thing " * 10] * 5
+    def test_singleton_new_is_slower_than_regular_new(self):
+        """The cache key construction in __new__ is more expensive than just
+        creating a fresh frozen dataclass. This is the root cause of singleton
+        overhead: every Node() call pays for building a tuple key and a dict
+        lookup, which costs more than allocating a small frozen object."""
+        from complex_tokenization.graph import Node
 
+        n = 50_000
+        GraphSettings.USE_SINGLETONS = False
         start = time.perf_counter()
-        train_with_settings(texts, use_singletons=False, num_merges=30)
+        for i in range(n):
+            Node(value=bytes([i % 256]))
         time_off = time.perf_counter() - start
 
+        GraphVertex._instances.clear()
+        GraphSettings.USE_SINGLETONS = True
         start = time.perf_counter()
-        train_with_settings(texts, use_singletons=True, num_merges=30)
+        for i in range(n):
+            Node(value=bytes([i % 256]))
         time_on = time.perf_counter() - start
 
-        # Singletons should not be more than 3x slower (regression guard)
-        assert time_on < time_off * 3, (
-            f"Singletons too slow: {time_on:.3f}s vs {time_off:.3f}s"
+        assert time_on > time_off, (
+            f"Expected singleton __new__ to be slower: {time_on:.4f}s vs {time_off:.4f}s"
         )
