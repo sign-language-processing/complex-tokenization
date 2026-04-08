@@ -197,6 +197,65 @@ class Tree(GraphVertex):
 
 
 @dataclass(frozen=True, slots=True)
+class FullyConnectedGraph(GraphVertex):
+    """A set of nodes where every pair is a valid merge candidate.
+
+    Used for Hebrew diacritics: dagesh, nikkud, and cantillation marks
+    on the same letter are interchangeable in merge order.
+    """
+    nodes: tuple[GraphVertex, ...]
+
+    def __bytes__(self):
+        return b"".join(bytes(n) for n in self.nodes)
+
+    @property
+    def oid(self) -> str:
+        return self.nodes[0].oid
+
+    def get_merges(self) -> Iterator[tuple]:
+        for node in self.nodes:
+            yield from node.get_merges()
+        for i in range(len(self.nodes)):
+            for j in range(len(self.nodes)):
+                if i != j:
+                    yield (self.nodes[i], self.nodes[j])
+
+    def merge(self, token: Node, merge: tuple):
+        remaining = list(self.nodes)
+        if len(merge) == 2:
+            m0, m1 = merge
+            for i in range(len(remaining)):
+                if remaining[i] == m0:
+                    for j in range(len(remaining)):
+                        if i != j and remaining[j] == m1:
+                            merged = [n for k, n in enumerate(remaining) if k not in (i, j)]
+                            merged.append(token)
+                            if len(merged) == 1:
+                                return merged[0]
+                            return FullyConnectedGraph(nodes=tuple(merged))
+
+        merged_nodes = tuple(n.merge(token, merge) for n in self.nodes)
+        if merged_nodes == self.nodes:
+            return self
+        return FullyConnectedGraph(nodes=merged_nodes)
+
+    def dot(self, level=0) -> Iterable[str]:
+        color = "#ffe0cc" if level % 2 == 1 else "#ffd0b0"
+        yield f"subgraph cluster_{id(self)} {{"
+        yield f'\tlabel="{dot_escape(str(self))}";'
+        yield f'\tstyle=filled; color="{color}";'
+        yield '\tnode [style=filled, color=white];'
+        yield '\tedge [arrowhead=none, style=dashed];'
+        yield ''
+        for node in self.nodes:
+            yield from node.dot(level + 1)
+        for i in range(len(self.nodes)):
+            for j in range(i + 1, len(self.nodes)):
+                yield f'\t{self.nodes[i].oid} -> {self.nodes[j].oid} [dir=both];'
+        yield "}"
+
+
+@dataclass(frozen=True, slots=True)
 class UnconnectedGraphs(GraphVertex):
     subgraphs: tuple[GraphVertex, ...]
 
