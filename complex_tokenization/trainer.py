@@ -20,12 +20,15 @@ class Trainer:
         self.graph = graph
         self.merges = []
 
-    def train(self, num_merges: int = 100, draw=False, verbose=False):
+    def train(self, num_merges: int = 100, draw=False, verbose=False, progress=False):
         frames = []
 
-        while True:
-            if len(self.merges) >= num_merges:
-                break
+        remaining = range(len(self.merges), num_merges)
+        if progress:
+            from tqdm import tqdm
+            remaining = tqdm(remaining, desc="Training", initial=len(self.merges), total=num_merges)
+
+        for _ in remaining:
 
             if draw:
                 dot_content = "\n".join(self.graph.dot())

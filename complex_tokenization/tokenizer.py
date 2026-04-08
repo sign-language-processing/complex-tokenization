@@ -58,7 +58,7 @@ class Tokenizer:
             for text in texts
         )
 
-    def train(self, texts: list[str], num_merges: int = 100) -> list[tuple[str, ...]]:
+    def train(self, texts: list[str], num_merges: int = 100, progress: bool = False) -> list[tuple[str, ...]]:
         GraphSettings.ONLY_MINIMAL_MERGES = True
         GraphSettings.MAX_MERGE_SIZE = self.merge_size
 
@@ -71,7 +71,7 @@ class Tokenizer:
             trainer.graph = trainer.graph.merge(token, nodes)
             trainer.merges.append((token, nodes))
 
-        trainer.train(num_merges=num_merges)
+        trainer.train(num_merges=num_merges, progress=progress)
         self.merges = trainer.get_merges()
         return self.merges
 
@@ -99,12 +99,12 @@ class SuperBPETokenizer(Tokenizer):
         super().__init__(units=units, merge_size=2, connected=False)
         self._disconnected_merges = disconnected_merges
 
-    def train(self, texts: list[str], num_merges: int = 100) -> list[tuple[str, ...]]:
+    def train(self, texts: list[str], num_merges: int = 100, progress: bool = False) -> list[tuple[str, ...]]:
         disconnected_merges = self._disconnected_merges or num_merges // 2
 
         phase1 = BPETokenizer(units=self.units)
-        phase1.train(texts, num_merges=disconnected_merges)
+        phase1.train(texts, num_merges=disconnected_merges, progress=progress)
 
         self.connected = True
         self.add_merges(phase1.merges)
-        return super().train(texts, num_merges=num_merges)
+        return super().train(texts, num_merges=num_merges, progress=progress)
