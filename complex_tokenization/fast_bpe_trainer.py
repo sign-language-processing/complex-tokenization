@@ -25,6 +25,7 @@ class FastBPETrainer:
                 self.word_freqs[token_tuple] += 1
 
         self.merges: list[tuple[bytes, bytes]] = []
+        self.stats: list[dict] = []
 
     @staticmethod
     def _text_to_token_tuples(text, connected, units) -> list[tuple[bytes, ...]]:
@@ -80,19 +81,33 @@ class FastBPETrainer:
         self.word_freqs = new_freqs
         return new_freqs
 
+    def _total_tokens(self) -> int:
+        return sum(len(w) * f for w, f in self.word_freqs.items())
+
     def train(self, num_merges: int = 100):
         pair_counts = self._get_pair_counts()
+        initial_tokens = self._total_tokens()
 
         for _ in range(num_merges):
             if not pair_counts:
                 break
 
             best_pair = max(pair_counts, key=pair_counts.get)
-            if pair_counts[best_pair] < 1:
+            freq = pair_counts[best_pair]
+            if freq < 1:
                 break
 
             self._apply_merge(best_pair)
             self.merges.append(best_pair)
+
+            current_tokens = self._total_tokens()
+            self.stats.append({
+                "step": len(self.merges),
+                "pair": best_pair,
+                "frequency": freq,
+                "total_tokens": current_tokens,
+                "compression": 1 - current_tokens / initial_tokens if initial_tokens else 0,
+            })
 
             pair_counts = Counter()
             for word, freq in self.word_freqs.items():
