@@ -2,8 +2,7 @@ from collections import Counter
 from functools import reduce
 
 from complex_tokenization.draw import create_gif, draw_dot_content
-from complex_tokenization.graph import GraphVertex, Node, Tree, UnconnectedGraphs
-from complex_tokenization.graphs.settings import GraphSettings
+from complex_tokenization.graph import GraphVertex, Tree, UnconnectedGraphs
 from complex_tokenization.graphs.units import utf8
 
 
@@ -35,22 +34,16 @@ class Trainer:
                 image = draw_dot_content(dot_content)
                 frames.append(image)
 
-            all_merges = self.graph.get_merges()
-            if GraphSettings.ONLY_MINIMAL_MERGES:
-                all_merges = (m for m in all_merges if all(isinstance(n, Node) for n in m))
-            merges = Counter(all_merges)
-            merges_compression = Counter({k: (len(k) - 1) * v for k, v in merges.items()})
+            counts = Counter(self.graph.get_merges())
 
-            if verbose:
-                print(merges_compression.most_common(5))
-
-            if len(merges) == 0:
+            if not counts:
                 break
-            nodes = merges_compression.most_common(1)[0][0]
-            token = reduce(lambda x, y: x + y, nodes)
+
+            nodes = max(counts, key=lambda k: (len(k) - 1) * counts[k])
 
             if verbose:
-                print("Merging", token, "=", nodes)
+                print("Merging", nodes, "count=", counts[nodes])
+            token = reduce(lambda x, y: x + y, nodes)
 
             self.graph = self.graph.merge(token, nodes)
             self.merges.append((token, nodes))

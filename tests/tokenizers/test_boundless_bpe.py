@@ -12,14 +12,15 @@ class TestBoundlessBPE:
         """BPE exhausts intra-word merges; boundless continues across words."""
         texts = ["ab cd ab cd ab cd"]
 
-        bpe_merges = BPETokenizer().train(texts, num_merges=5)
-        boundless_merges = BoundlessBPETokenizer().train(texts, num_merges=5)
+        bpe_merges = BPETokenizer().train(texts, num_merges=10)
+        boundless_merges = BoundlessBPETokenizer().train(texts, num_merges=10)
 
         assert bpe_merges == [
             ('a', 'b'), (' ', 'c'), (' c', 'd'), (' ', 'ab'),
         ]
         assert boundless_merges == [
-            ('a', 'b'), (' ', 'c'), (' c', 'd'), (' ', 'ab'), (' cd', ' ab'),
+            ('a', 'b'), (' ', 'c'), (' c', 'd'), (' ', 'ab'),
+            (' cd', ' ab'), ('ab', ' cd ab'), ('ab cd ab', ' cd ab'),
+            ('ab cd ab cd ab', ' cd'),
         ]
-        assert boundless_merges[:len(bpe_merges)] == bpe_merges
         assert len(boundless_merges) > len(bpe_merges)
