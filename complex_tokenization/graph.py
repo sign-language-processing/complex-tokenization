@@ -15,17 +15,6 @@ def dot_escape(s: str) -> str:
 
 
 class GraphVertex:
-    _instances = {}  # Singleton pattern
-
-    def __new__(cls, *args, **kwargs):
-        if not GraphSettings.USE_SINGLETONS:
-            return super().__new__(cls)
-
-        key = (cls,) + args + tuple(kwargs.values())
-        if key not in cls._instances:
-            cls._instances[key] = super().__new__(cls)
-        return cls._instances[key]
-
     def __bytes__(self):
         raise NotImplementedError
 
@@ -35,12 +24,6 @@ class GraphVertex:
         if token_replacement is not None:
             return token_replacement
         return self_str
-
-    def __eq__(self, other):
-        return self is other
-
-    def __hash__(self):
-        return id(self)
 
     def dot(self, level=0) -> Iterable[str]:
         raise NotImplementedError
