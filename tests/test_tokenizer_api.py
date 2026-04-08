@@ -63,3 +63,23 @@ class TestTokenizerAPI:
         super_bpe = SuperBPETokenizer(disconnected_merges=5)
         super_merges = super_bpe.train(texts, num_merges=10)
         assert super_merges[:5] == bpe_merges
+
+    def test_custom_pretokenizer_regex(self):
+        from tokenizers import Regex
+        from tokenizers.pre_tokenizers import Split
+        tok = BPETokenizer(pretokenizer=Split(Regex(r"\w+|\S"), behavior="isolated"))
+        merges = tok.train(["hello hello hello"], num_merges=2)
+        assert len(merges) >= 1
+
+    def test_custom_pretokenizer_whitespace(self):
+        from tokenizers.pre_tokenizers import Whitespace
+        tok = BPETokenizer(pretokenizer=Whitespace())
+        merges = tok.train(["ab ab ab cd cd cd"], num_merges=2)
+        assert len(merges) >= 1
+
+    def test_different_pretokenizer_different_merges(self):
+        from tokenizers.pre_tokenizers import Whitespace
+        texts = ["hello-world hello-world hello-world"]
+        default_merges = BPETokenizer().train(texts, num_merges=5)
+        whitespace_merges = BPETokenizer(pretokenizer=Whitespace()).train(texts, num_merges=5)
+        assert default_merges != whitespace_merges

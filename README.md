@@ -10,99 +10,92 @@ by decomposing words into smaller units, and representing them in various graph 
 Install:
 
 ```bash
-git clone https://github.com/sign-language-processing/complex-tokenization.git
-cd complex-tokenization
-pip install ".[dev]"
+pip install complex-tokenization
 ```
 
-Pretokenize text using a Huggingface Tokenizer implementation:
+Train a tokenizer:
 
 ```python
-from complex_tokenization.tokenizer import WordsSegmentationTokenizer
+from complex_tokenization import BPETokenizer
 
-pretokenizer = WordsSegmentationTokenizer(max_bytes=16)
-tokens = pretokenizer.tokenize("hello world! 我爱北京天安门 👩‍👩‍👧‍👦")
-# ['hello ', 'world! ', '我', '爱', '北京', '天安门', ' ', '👩‍👩‍👧‍👦‍']
+tokenizer = BPETokenizer()
+tokenizer.train(["the teacher teaches the thick thing"], num_merges=5)
+print(tokenizer.get_merges())
+# [(' ', 't'), ('h', 'e'), (' t', 'he'), (' t', 'e'), (' te', 'a')]
+```
+
+## Tokenizer Variants
+
+All tokenizers accept `units`, `pretokenizer`, and variant-specific parameters:
+
+```python
+from complex_tokenization import BPETokenizer, BNETokenizer, BoundlessBPETokenizer, SuperBPETokenizer
+
+# BPE: standard byte-pair encoding (merge_size=2, word boundaries)
+tok = BPETokenizer()
+
+# BNE: byte-ngram encoding (merge up to n tokens at once)
+tok = BNETokenizer(n=4)
+
+# Boundless BPE: merges across word boundaries
+tok = BoundlessBPETokenizer()
+
+# Super BPE: intra-word merges first, then cross-word merges
+tok = SuperBPETokenizer(disconnected_merges=50)
 ```
 
 ## Pretokenization
 
-Our tokenizers run on a graph structure, which we can manipulate via pre-tokenization functions.
+By default, text is split using the GPT pretokenization regex pattern.
+You can pass any HuggingFace `PreTokenizer`:
+
+```python
+from complex_tokenization import BPETokenizer
+from tokenizers import Regex
+from tokenizers.pre_tokenizers import Split, Whitespace
+
+# Default: GPT regex pattern
+tok = BPETokenizer()
+
+# Whitespace splitting
+tok = BPETokenizer(pretokenizer=Whitespace())
+
+# Custom regex
+tok = BPETokenizer(pretokenizer=Split(Regex(r"\w+|\S"), behavior="isolated"))
+```
 
 ## Units
 
-Units are the basic blocks we operate on, such as character, or bytes.
-We implement three basic blocks:
+Units are the basic blocks we operate on.
+We implement three base units, plus language-specific decompositions via the script registry:
 
 ```python
-from complex_tokenization.graphs.units import characters, utf8, utf8_clusters
+from complex_tokenization import BPETokenizer
 
-text = "שלום"
+# UTF-8 grapheme clusters (default) — one node sequence per cluster
+tok = BPETokenizer(units="utf8_clusters")
 
-# Characters Split assigns a single node per character (4 characters)
-assert characters(text) == NodesSequence((Node("ש"), Node("ל"), Node("ו"), Node("ם")))
+# Raw UTF-8 bytes — one node per byte
+tok = BPETokenizer(units="utf8")
 
-# UTF-8 Split assigns a single node per byte (8 bytes)
-assert utf8(text) == NodesSequence((Node(value=b'\xd7'), Node(value=b'\xa9'),
-                                    Node(value=b'\xd7'), Node(value=b'\x9c'),
-                                    Node(value=b'\xd7'), Node(value=b'\x95'),
-                                    Node(value=b'\xd7'), Node(value=b'\x9d')))
-
-# UTF-8 Clusters Split assigns a single node sequence per cluster, a single node per byte (4 clusters, 2 bytes each)
-assert utf8_clusters(text) == NodesSequence((
-    NodesSequence((Node(value=b'\xd7'), Node(value=b'\xa9'))),
-    NodesSequence((Node(value=b'\xd7'), Node(value=b'\x9c'))),
-    NodesSequence((Node(value=b'\xd7'), Node(value=b'\x95'))),
-    NodesSequence((Node(value=b'\xd7'), Node(value=b'\x9d')))))
+# Characters — one node per Unicode character
+tok = BPETokenizer(units="characters")
 ```
 
-## Words
+### Language-Specific Units
 
-A long text that includes multiple words, can be treated as a single text (without boundaries),
-or each word could be considered a single cluster.
-
-Words can be "connected" to eachother, to allow merging over words,
-or "disconnected" to disallow merging over word boundaries.
+Register script-specific handlers for structural decomposition:
 
 ```python
-from complex_tokenization.graphs.units import utf8_clusters
-from complex_tokenization.graphs.words import words
+from complex_tokenization import BPETokenizer
+from complex_tokenization.languages.hebrew.decompose import decompose_cluster
+from complex_tokenization.languages.chinese.graph import chinese_character_to_graph
 
-text = "a few words"
-
-# Train tokenization on the entire text
-graph = utf8_clusters(text)
-
-# Treat each word as a cluster, and words are connected
-
-graph = words(text, units=utf8_clusters, connected=True)
+tok = BPETokenizer()
+tok.register_script("Hebrew", decompose_cluster)  # nikkud/dagesh as FullyConnectedGraph
+tok.register_script("Han", chinese_character_to_graph)  # IDS tree decomposition
+tok.train(texts, num_merges=100)
 ```
-
-## Tokenizers Implementation
-
-### BNE (Byte-Ngram Encoding)
-
-Byte-Ngram Encoding creates a merge over a sequence of units up to a certain size `N`.
-It treats words as disconnected units, and does not allow merges over unmerged clusters.
-
-```python
-from complex_tokenization.graphs.settings import GraphSettings
-from complex_tokenization.graphs.units import utf8_clusters
-from complex_tokenization.graphs.words import words
-
-GraphSettings.ONLY_MINIMAL_MERGES = True  # BNE only merges adjacent tokens
-GraphSettings.MAX_MERGE_SIZE = N  # Maximum number of tokens to merge at a time
-
-text = "a large text corpus..."
-
-graph = words(text, units=utf8_clusters, connected=False)
-```
-
-### BPE (Byte-Pair Encoding)
-
-Same as `BNE`, with a maximum of two tokens merged at a time `GraphSettings.MAX_MERGE_SIZE = 2`.
-
-### BoundlessBPE
 
 ## Cite
 
