@@ -81,39 +81,43 @@ class NodesSequence(GraphVertex):
         return self.nodes[0].oid
 
     def get_merges(self):
-        num_nodes = len(self.nodes)
-        for i, node in enumerate(self.nodes):
+        nodes = self.nodes
+        num_nodes = len(nodes)
+        only_minimal = GraphSettings.ONLY_MINIMAL_MERGES
+        max_size = GraphSettings.MAX_MERGE_SIZE
+
+        for i in range(num_nodes):
+            node = nodes[i]
             yield from node.get_merges()
 
-            if GraphSettings.ONLY_MINIMAL_MERGES and not isinstance(node, Node):
+            if only_minimal and not isinstance(node, Node):
                 continue
 
-            for j in range(i + 2, min(i + GraphSettings.MAX_MERGE_SIZE + 1, num_nodes + 1)):
-                if GraphSettings.ONLY_MINIMAL_MERGES and j < num_nodes and not isinstance(self.nodes[j], Node):
+            for j in range(i + 2, min(i + max_size + 1, num_nodes + 1)):
+                if only_minimal and j < num_nodes and not isinstance(nodes[j], Node):
                     break
-                yield tuple(self.nodes[i:j])
+                yield (nodes[i], nodes[j - 1]) if j - i == 2 else tuple(nodes[i:j])
 
     def merge(self, token: Node, merge: tuple["GraphVertex", ...]):
         m = len(merge)
-        i = 0
+        nodes = self.nodes
+        n = len(nodes)
         out: list[GraphVertex] = []
-        nodes = self.nodes  # local alias
+        i = 0
 
-        while i <= len(nodes) - m:
-            if tuple(nodes[i:i + m]) == merge:
-                out.append(Node(value=token.value))
-                i += m  # skip the matched span
+        while i <= n - m:
+            if nodes[i:i + m] == merge:
+                out.append(token)
+                i += m
             else:
                 out.append(nodes[i])
                 i += 1
-
-        # append any remaining tail
         out.extend(nodes[i:])
 
         if len(out) == 1:
             return out[0]
 
-        merged_nodes = tuple([n.merge(token, merge) for n in out])
+        merged_nodes = tuple(n.merge(token, merge) for n in out)
         return NodesSequence(merged_nodes)
 
     def dot(self, level=0) -> Iterable[str]:
