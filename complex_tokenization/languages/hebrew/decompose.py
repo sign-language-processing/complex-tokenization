@@ -1,4 +1,4 @@
-"""Decompose Hebrew text into graph structure.
+"""Decompose Hebrew grapheme clusters into graph structure.
 
 Each grapheme cluster becomes:
 - A NodesSequence of [base_letter, diacritics_graph]
@@ -7,8 +7,6 @@ Each grapheme cluster becomes:
 """
 
 import unicodedata
-
-import regex
 
 from complex_tokenization.graph import FullyConnectedGraph, GraphVertex, NodesSequence
 from complex_tokenization.graphs.units import utf8
@@ -48,13 +46,3 @@ def decompose_cluster(cluster: str) -> GraphVertex:
         return diacritics
 
     return NodesSequence(nodes=(base_node, diacritics))
-
-
-def hebrew_grapheme_clusters(text: str) -> GraphVertex:
-    """Convert Hebrew text to a graph using grapheme cluster decomposition."""
-    clusters = regex.findall(r'\X', text)
-    nodes = [decompose_cluster(c) for c in clusters]
-
-    if len(nodes) == 1:
-        return nodes[0]
-    return NodesSequence(nodes=tuple(nodes))
