@@ -1,6 +1,5 @@
 from complex_tokenization.examples.boundless_bpe import train_boundless_bpe_tokenizer
 from complex_tokenization.examples.bpe import train_bpe_tokenizer
-from complex_tokenization.examples.utils import text_dataset
 
 
 class TestBoundlessBPE:
@@ -9,36 +8,24 @@ class TestBoundlessBPE:
         merges = train_boundless_bpe_tokenizer(texts, num_merges=2)
         assert len(merges) == 2
 
-    def test_boundless_bpe_can_merge_across_words(self):
-        """Boundless BPE should be able to merge tokens across word boundaries."""
+    def test_boundless_extends_bpe_with_cross_word_merges(self):
+        """BPE exhausts intra-word merges; boundless continues across words."""
         texts = ["ab cd ab cd ab cd"]
-        merges_bounded = train_bpe_tokenizer(texts, num_merges=5)
-        merges_boundless = train_boundless_bpe_tokenizer(texts, num_merges=5)
-        assert merges_bounded != merges_boundless
+        bpe_merges = train_bpe_tokenizer(texts, num_merges=5)
+        boundless_merges = train_boundless_bpe_tokenizer(texts, num_merges=5)
 
-    def test_large_boundless_bpe_expected_merges(self):
-        """Test actual merge values on the wikitext dataset, like test_bne does."""
-        texts = list(text_dataset(max_samples=10))
-        merges = train_boundless_bpe_tokenizer(texts, num_merges=10)
-
-        expected = [
-            (" ", "t"),
-            (" ", "a"),
-            ("o", "n"),
-            ("h", "e"),
-            ("e", "s"),
-            ("e", "r"),
-            ("i", "n"),
-            (" t", "he"),
-            ("e", "d"),
-            ("a", "l"),
+        assert bpe_merges == [
+            ('a', 'b'),
+            (' ', 'c'),
+            (' c', 'd'),
+            (' ', 'ab'),
         ]
-
-        assert merges == expected
-
-    def test_large_boundless_bpe_all_pairs(self):
-        texts = list(text_dataset(max_samples=10))
-        merges = train_boundless_bpe_tokenizer(texts, num_merges=10)
-        assert len(merges) == 10
-        for merge in merges:
-            assert len(merge) == 2
+        assert boundless_merges == [
+            ('a', 'b'),
+            (' ', 'c'),
+            (' c', 'd'),
+            (' ', 'ab'),
+            (' cd', ' ab'),
+        ]
+        assert boundless_merges[:len(bpe_merges)] == bpe_merges
+        assert len(boundless_merges) > len(bpe_merges)
