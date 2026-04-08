@@ -1,9 +1,16 @@
 import json
 
+from datasets import load_dataset
 from tokenizers import Tokenizer
 
-from complex_tokenization.examples.bne import train_bne_tokenizer
-from complex_tokenization.examples.utils import text_dataset
+
+def text_dataset(max_samples=None,
+                 dataset="Salesforce/wikitext",
+                 dataset_config="wikitext-2-raw-v1"):
+    dataset = load_dataset(dataset, dataset_config, streaming=True, split="train")
+    if max_samples is not None:
+        dataset = dataset.take(max_samples)
+    return (sample["text"] for sample in dataset)
 
 
 def get_tokenizer_merges(tokenizer: Tokenizer):
@@ -19,14 +26,3 @@ def train_huggingface_tokenizer(texts: list[str], num_merges: int = 10):
 
     new_tokenizer = tokenizer.train_new_from_iterator(texts, 256 + 21 + num_merges)
     return get_tokenizer_merges(new_tokenizer)
-
-
-def train_bpe_tokenizer(texts: list[str], num_merges: int = 10):
-    # BPE can only merge 2 tokens at a time
-    return train_bne_tokenizer(texts, n=2, num_merges=num_merges)
-
-
-if __name__ == "__main__":
-    texts = list(text_dataset(max_samples=10))
-    print(train_bpe_tokenizer(texts))
-    print(train_huggingface_tokenizer(texts))
