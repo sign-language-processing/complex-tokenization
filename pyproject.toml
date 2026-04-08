@@ -11,6 +11,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+draw = [
+    "graphviz",
+    "Pillow",
+]
 examples = [
     "datasets",
     "tokenizers",
@@ -21,7 +25,7 @@ dev = [
     "pytest",
     "pytest-timeout",
     "pytest-xdist", # For parallel test execution
-    "complex-tokenization[examples]",
+    "complex-tokenization[draw,examples]",
 ]
 
 
