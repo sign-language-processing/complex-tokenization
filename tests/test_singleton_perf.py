@@ -28,11 +28,7 @@ class TestSingletonPerformance:
         merges_on = train_with_settings(texts, use_singletons=True)
         assert merges_off == merges_on
 
-    def test_singleton_new_is_slower_than_regular_new(self):
-        """The cache key construction in __new__ is more expensive than just
-        creating a fresh frozen dataclass. This is the root cause of singleton
-        overhead: every Node() call pays for building a tuple key and a dict
-        lookup, which costs more than allocating a small frozen object."""
+    def test_singleton_overhead_under_2x(self):
         from complex_tokenization.graph import Node
 
         n = 50_000
@@ -49,6 +45,13 @@ class TestSingletonPerformance:
             Node(value=bytes([i % 256]))
         time_on = time.perf_counter() - start
 
-        assert time_on > time_off, (
-            f"Expected singleton __new__ to be slower: {time_on:.4f}s vs {time_off:.4f}s"
+        assert time_on < time_off * 2, (
+            f"Singleton overhead too high: {time_on:.4f}s vs {time_off:.4f}s"
         )
+
+    def test_singletons_at_scale(self):
+        """10k copies of 'the' — singletons must produce identical merges."""
+        texts = ["the " * 10000]
+        merges_off = train_with_settings(texts, use_singletons=False, num_merges=5)
+        merges_on = train_with_settings(texts, use_singletons=True, num_merges=5)
+        assert merges_off == merges_on

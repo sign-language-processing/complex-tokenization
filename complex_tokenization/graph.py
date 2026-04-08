@@ -21,7 +21,7 @@ class GraphVertex:
         if not GraphSettings.USE_SINGLETONS:
             return super().__new__(cls)
 
-        key = (cls, args, tuple(sorted(kwargs.items())))
+        key = (cls,) + args + tuple(kwargs.values())
         if key not in cls._instances:
             cls._instances[key] = super().__new__(cls)
         return cls._instances[key]
