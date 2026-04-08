@@ -263,8 +263,11 @@ class UnconnectedGraphs(GraphVertex):
         raise Exception("Cannot convert UnconnectedGraphs to bytes")
 
     def merge(self, token: Node, merge: tuple):
-        subgraphs = tuple(subgraph.merge(token, merge) for subgraph in self.subgraphs)
-        return UnconnectedGraphs(subgraphs=subgraphs)
+        old = self.subgraphs
+        new = tuple(sg.merge(token, merge) for sg in old)
+        if new == old:
+            return self
+        return UnconnectedGraphs(subgraphs=new)
 
     def get_merges(self) -> Iterator[tuple]:
         for subgraph in self.subgraphs:
