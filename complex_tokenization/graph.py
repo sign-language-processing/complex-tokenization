@@ -21,10 +21,9 @@ class GraphVertex:
         if not GraphSettings.USE_SINGLETONS:
             return super().__new__(cls)
 
-        key = (args, tuple(sorted(kwargs.items())))
+        key = (cls, args, tuple(sorted(kwargs.items())))
         if key not in cls._instances:
             cls._instances[key] = super().__new__(cls)
-            cls._instances[key].__init__(*args, **kwargs)  # optional, if side effects desired
         return cls._instances[key]
 
     def __bytes__(self):
@@ -111,10 +110,10 @@ class NodesSequence(GraphVertex):
                     break
                 yield tuple(self.nodes[i:j])
 
-    def merge(self, token: Node, merge: tuple[Node, ...]):
+    def merge(self, token: Node, merge: tuple["GraphVertex", ...]):
         m = len(merge)
         i = 0
-        out: list[Node] = []
+        out: list[GraphVertex] = []
         nodes = self.nodes  # local alias
 
         while i <= len(nodes) - m:
@@ -158,9 +157,7 @@ class NodesSequence(GraphVertex):
         if isinstance(other, NodesSequence):
             return NodesSequence(self.nodes + other.nodes)
         if isinstance(other, Node):
-            print("other", type(other))
-            print(self.nodes, type(self.nodes))
-            return NodesSequence(self.nodes + tuple([other]))
+            return NodesSequence(self.nodes + (other,))
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,8 +227,4 @@ class UnconnectedGraphs(GraphVertex):
     def dot(self, level=0) -> Iterable[str]:
         for subgraph in self.subgraphs:
             yield from subgraph.dot(level)
-
-
-
-
 

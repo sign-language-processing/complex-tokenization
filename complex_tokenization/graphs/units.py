@@ -4,7 +4,7 @@ from complex_tokenization.graph import GraphVertex, Node, NodesSequence
 
 
 def characters(s: str) -> GraphVertex:
-    nodes = [Node(c) for c in s]
+    nodes = [Node(c.encode("utf-8")) for c in s]
 
     if len(nodes) == 1:
         return nodes[0]

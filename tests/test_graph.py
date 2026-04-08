@@ -17,7 +17,8 @@ def readable_merges(graph: GraphVertex):
 
 class TestUnitsWord:
     def test_characters_split(self):
-        assert characters("שלום") == NodesSequence((Node("ש"), Node("ל"), Node("ו"), Node("ם")))
+        assert characters("שלום") == NodesSequence((
+            Node("ש".encode()), Node("ל".encode()), Node("ו".encode()), Node("ם".encode())))
 
     def test_utf8_split(self):
         assert utf8("שלום") == NodesSequence((Node(value=b'\xd7'), Node(value=b'\xa9'),
