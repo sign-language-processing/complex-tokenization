@@ -43,11 +43,14 @@ class Tokenizer:
             self.units = units
         self.merge_size = merge_size
         self.connected = connected
-        self.trainer: Trainer | None = None
+        self.merges: list[tuple[str, ...]] = []
 
     @staticmethod
     def register_script(script: str, handler: Callable[[str], GraphVertex]):
         register_script(script, handler)
+
+    def add_merges(self, merges: list[tuple[str, ...]]):
+        self.merges.extend(merges)
 
     def _build_graphs(self, texts: list[str]) -> tuple[GraphVertex, ...]:
         return tuple(
@@ -55,28 +58,25 @@ class Tokenizer:
             for text in texts
         )
 
-    def train(self, texts: list[str], num_merges: int = 100,
-              known_merges: list[tuple[str, ...]] | None = None) -> list:
+    def train(self, texts: list[str], num_merges: int = 100) -> list[tuple[str, ...]]:
         GraphSettings.ONLY_MINIMAL_MERGES = True
         GraphSettings.MAX_MERGE_SIZE = self.merge_size
 
         graphs = self._build_graphs(texts)
-        self.trainer = Trainer(graphs=graphs)
+        trainer = Trainer(graphs=graphs)
 
-        if known_merges:
-            for merge_strs in known_merges:
-                nodes = tuple(Node(value=s.encode("utf-8")) for s in merge_strs)
-                token = reduce(lambda a, b: a + b, nodes)
-                self.trainer.graph = self.trainer.graph.merge(token, nodes)
-                self.trainer.merges.append((token, nodes))
+        for merge_strs in self.merges:
+            nodes = tuple(Node(value=s.encode("utf-8")) for s in merge_strs)
+            token = reduce(lambda a, b: a + b, nodes)
+            trainer.graph = trainer.graph.merge(token, nodes)
+            trainer.merges.append((token, nodes))
 
-        self.trainer.train(num_merges=num_merges)
-        return self.get_merges()
+        trainer.train(num_merges=num_merges)
+        self.merges = trainer.get_merges()
+        return self.merges
 
     def get_merges(self) -> list[tuple[str, ...]]:
-        if self.trainer is None:
-            return []
-        return self.trainer.get_merges()
+        return list(self.merges)
 
 
 class BPETokenizer(Tokenizer):
@@ -99,15 +99,12 @@ class SuperBPETokenizer(Tokenizer):
         super().__init__(units=units, merge_size=2, connected=False)
         self._disconnected_merges = disconnected_merges
 
-    def train(self, texts: list[str], num_merges: int = 100,
-              known_merges: list[tuple[str, ...]] | None = None) -> list:
+    def train(self, texts: list[str], num_merges: int = 100) -> list[tuple[str, ...]]:
         disconnected_merges = self._disconnected_merges or num_merges // 2
 
         phase1 = BPETokenizer(units=self.units)
-        phase1_merges = phase1.train(texts, num_merges=disconnected_merges, known_merges=known_merges)
+        phase1.train(texts, num_merges=disconnected_merges)
 
-        phase2 = BoundlessBPETokenizer(units=self.units)
-        result = phase2.train(texts, num_merges=num_merges, known_merges=phase1_merges)
-
-        self.trainer = phase2.trainer
-        return result
+        self.connected = True
+        self.add_merges(phase1.merges)
+        return super().train(texts, num_merges=num_merges)

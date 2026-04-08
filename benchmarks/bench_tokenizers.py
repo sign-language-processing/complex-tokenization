@@ -3,11 +3,8 @@
 import time
 import tracemalloc
 
-from complex_tokenization.examples.bne import train_bne_tokenizer
-from complex_tokenization.examples.boundless_bpe import train_boundless_bpe_tokenizer
-from complex_tokenization.examples.bpe import train_bpe_tokenizer, train_huggingface_tokenizer
-from complex_tokenization.examples.super_bpe import train_super_bpe_tokenizer
-from complex_tokenization.examples.utils import text_dataset
+from complex_tokenization.tokenizer import BNETokenizer, BoundlessBPETokenizer, BPETokenizer, SuperBPETokenizer
+from tests.utils import text_dataset, train_huggingface_tokenizer
 
 
 def bench(name, fn, *args, **kwargs):
@@ -33,10 +30,10 @@ def run_benchmarks(num_samples=10, num_merges=50):
     print("-" * 70)
 
     bench("HuggingFace BPE", train_huggingface_tokenizer, texts, num_merges=num_merges)
-    bench("BPE (ours)", train_bpe_tokenizer, texts, num_merges=num_merges)
-    bench("BNE n=4 (ours)", train_bne_tokenizer, texts, n=4, num_merges=num_merges)
-    bench("Boundless BPE (ours)", train_boundless_bpe_tokenizer, texts, num_merges=num_merges)
-    bench("Super BPE (ours)", train_super_bpe_tokenizer, texts, num_merges=num_merges)
+    bench("BPE (ours)", lambda t, **kw: BPETokenizer().train(t, **kw), texts, num_merges=num_merges)
+    bench("BNE n=4 (ours)", lambda t, **kw: BNETokenizer(n=4).train(t, **kw), texts, num_merges=num_merges)
+    bench("Boundless BPE (ours)", lambda t, **kw: BoundlessBPETokenizer().train(t, **kw), texts, num_merges=num_merges)
+    bench("Super BPE (ours)", lambda t, **kw: SuperBPETokenizer().train(t, **kw), texts, num_merges=num_merges)
 
 
 if __name__ == "__main__":

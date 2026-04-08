@@ -12,7 +12,6 @@ from complex_tokenization.trainer import Trainer
 def train_graph_bpe(texts, num_merges):
     GraphSettings.ONLY_MINIMAL_MERGES = True
     GraphSettings.MAX_MERGE_SIZE = 2
-    GraphSettings.USE_SINGLETONS = False
     graphs = tuple(words(t, connected=False, units=utf8_clusters) for t in texts)
     trainer = Trainer(graphs=graphs)
     trainer.train(num_merges=num_merges)

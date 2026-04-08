@@ -2,8 +2,8 @@
 
 import time
 
-from complex_tokenization.examples.bpe import train_bpe_tokenizer
 from complex_tokenization.fast_bpe_trainer import FastBPETrainer
+from complex_tokenization.tokenizer import BPETokenizer
 
 
 class TestFastBPECorrectness:
@@ -12,7 +12,7 @@ class TestFastBPECorrectness:
         fast = FastBPETrainer(texts)
         fast.train(num_merges=5)
 
-        regular = train_bpe_tokenizer(texts, num_merges=5)
+        regular = BPETokenizer().train(texts, num_merges=5)
         assert fast.get_merges() == regular
 
     def test_matches_regular_bpe_medium(self):
@@ -20,7 +20,7 @@ class TestFastBPECorrectness:
         fast = FastBPETrainer(texts)
         fast.train(num_merges=20)
 
-        regular = train_bpe_tokenizer(texts, num_merges=20)
+        regular = BPETokenizer().train(texts, num_merges=20)
         assert fast.get_merges() == regular
 
     def test_empty_text(self):
@@ -40,7 +40,7 @@ class TestFastBPEPerformance:
         num_merges = 100
 
         start = time.perf_counter()
-        regular = train_bpe_tokenizer(texts, num_merges=num_merges)
+        regular = BPETokenizer().train(texts, num_merges=num_merges)
         regular_time = time.perf_counter() - start
 
         start = time.perf_counter()
