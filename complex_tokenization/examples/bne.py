@@ -19,7 +19,6 @@ def train_bne_tokenizer(texts: list[str],
 
     GraphSettings.ONLY_MINIMAL_MERGES = True
     GraphSettings.MAX_MERGE_SIZE = n
-    GraphSettings.USE_SINGLETONS = False
 
     graphs = tuple(words(text, connected=connected, units=units) for text in texts)
 
