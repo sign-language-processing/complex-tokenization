@@ -15,13 +15,24 @@ class TestSuperBPE:
 
     def test_super_bpe_differs_from_boundless(self):
         """Super BPE prioritizes intra-word merges; boundless picks by global frequency."""
-        texts = ["ab ac ab ac abcdefghik"]
+        texts = ["ab ac ab ac ab ac abcdefghik"]
 
         boundless = BoundlessBPETokenizer().train(texts, num_merges=10)
         super_bpe = SuperBPETokenizer(disconnected_merges=8).train(texts, num_merges=10)
 
-        assert boundless[4] == ('ab', ' ac')
-        assert super_bpe[4] == (' ab', 'c')
+        assert boundless == [
+            (' ', 'a'), (' a', 'c'), (' a', 'b'), (' ac', ' ab'),
+            ('a', 'b'), ('ab', ' ac ab'), ('ab ac ab', ' ac ab'),
+            ('ab ac ab ac ab', ' ac'), (' ab', 'c'), (' abc', 'd'),
+        ]
+        assert super_bpe == [
+            (' ', 'a'), (' a', 'c'), (' a', 'b'), ('a', 'b'),
+            (' ab', 'c'), (' abc', 'd'), (' abcd', 'e'), (' abcde', 'f'),
+            (' ac', ' ab'), ('ab', ' ac ab'),
+        ]
+
+        assert boundless[3] == (' ac', ' ab')
+        assert super_bpe[3] == ('a', 'b')
 
     def test_default_split(self):
         texts = ["the teacher teaches the thick thing"]

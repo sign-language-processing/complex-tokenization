@@ -94,7 +94,7 @@ class NodesSequence(GraphVertex):
                 continue
 
             for j in range(i + 2, min(i + max_size + 1, num_nodes + 1)):
-                if only_minimal and j < num_nodes and not isinstance(nodes[j], Node):
+                if only_minimal and not isinstance(nodes[j - 1], Node):
                     break
                 yield (nodes[i], nodes[j - 1]) if j - i == 2 else tuple(nodes[i:j])
 
@@ -175,7 +175,10 @@ class Tree(GraphVertex):
 
     def get_merges(self) -> Iterator[tuple]:
         yield from self.root.get_merges()
-        yield (self.root,) + self.children
+        if not GraphSettings.ONLY_MINIMAL_MERGES or (
+            isinstance(self.root, Node) and all(isinstance(c, Node) for c in self.children)
+        ):
+            yield (self.root,) + self.children
         for child in self.children:
             yield from child.get_merges()
 
