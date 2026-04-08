@@ -8,6 +8,7 @@ authors = [
 readme = "README.md"
 dependencies = [
     "regex",
+    "tokenizers",
     "tqdm",
 ]
 
@@ -18,7 +19,6 @@ draw = [
 ]
 examples = [
     "datasets",
-    "tokenizers",
     "transformers",
 ]
 dev = [

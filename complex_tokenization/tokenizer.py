@@ -15,10 +15,12 @@ With language-specific decomposition:
 from collections.abc import Callable
 from functools import reduce
 
+from tokenizers.pre_tokenizers import PreTokenizer
+
 from complex_tokenization.graph import GraphVertex, Node
 from complex_tokenization.graphs.settings import GraphSettings
 from complex_tokenization.graphs.units import characters, register_script, utf8, utf8_clusters
-from complex_tokenization.graphs.words import words
+from complex_tokenization.graphs.words import GPTPretokenizer, words
 from complex_tokenization.trainer import Trainer
 
 UNIT_FUNCTIONS: dict[str, Callable[[str], GraphVertex]] = {
@@ -34,6 +36,7 @@ class Tokenizer:
         units: str | Callable[[str], GraphVertex] = "utf8_clusters",
         merge_size: int = 2,
         connected: bool = False,
+        pretokenizer: PreTokenizer = GPTPretokenizer,
     ):
         if isinstance(units, str):
             if units not in UNIT_FUNCTIONS:
@@ -43,6 +46,7 @@ class Tokenizer:
             self.units = units
         self.merge_size = merge_size
         self.connected = connected
+        self.pretokenizer = pretokenizer
         self.merges: list[tuple[str, ...]] = []
 
     @staticmethod
@@ -54,7 +58,8 @@ class Tokenizer:
 
     def _build_graphs(self, texts: list[str]) -> tuple[GraphVertex, ...]:
         return tuple(
-            words(text, connected=self.connected, units=self.units)
+            words(text, connected=self.connected, units=self.units,
+                  pretokenizer=self.pretokenizer)
             for text in texts
         )
 
@@ -80,29 +85,29 @@ class Tokenizer:
 
 
 class BPETokenizer(Tokenizer):
-    def __init__(self, units="utf8_clusters"):
-        super().__init__(units=units, merge_size=2, connected=False)
+    def __init__(self, units="utf8_clusters", pretokenizer=GPTPretokenizer):
+        super().__init__(units=units, merge_size=2, connected=False, pretokenizer=pretokenizer)
 
 
 class BNETokenizer(Tokenizer):
-    def __init__(self, n=4, units="utf8_clusters"):
-        super().__init__(units=units, merge_size=n, connected=False)
+    def __init__(self, n=4, units="utf8_clusters", pretokenizer=GPTPretokenizer):
+        super().__init__(units=units, merge_size=n, connected=False, pretokenizer=pretokenizer)
 
 
 class BoundlessBPETokenizer(Tokenizer):
-    def __init__(self, units="utf8_clusters"):
-        super().__init__(units=units, merge_size=2, connected=True)
+    def __init__(self, units="utf8_clusters", pretokenizer=GPTPretokenizer):
+        super().__init__(units=units, merge_size=2, connected=True, pretokenizer=pretokenizer)
 
 
 class SuperBPETokenizer(Tokenizer):
-    def __init__(self, units="utf8_clusters", disconnected_merges: int | None = None):
-        super().__init__(units=units, merge_size=2, connected=False)
+    def __init__(self, units="utf8_clusters", disconnected_merges: int | None = None, pretokenizer=GPTPretokenizer):
+        super().__init__(units=units, merge_size=2, connected=False, pretokenizer=pretokenizer)
         self._disconnected_merges = disconnected_merges
 
     def train(self, texts: list[str], num_merges: int = 100, progress: bool = False) -> list[tuple[str, ...]]:
         disconnected_merges = self._disconnected_merges or num_merges // 2
 
-        phase1 = BPETokenizer(units=self.units)
+        phase1 = BPETokenizer(units=self.units, pretokenizer=self.pretokenizer)
         phase1.train(texts, num_merges=disconnected_merges, progress=progress)
 
         self.connected = True
