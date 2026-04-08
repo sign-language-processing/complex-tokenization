@@ -16,20 +16,47 @@ class TestSuperBPE:
         super_merges = train_super_bpe_tokenizer(texts, num_merges=5, disconnected_merges=3)
         assert super_merges[:3] == bpe_merges
 
-    def test_extends_bpe_like_boundless(self):
-        """After intra-word phase, super BPE merges across words like boundless."""
-        texts = ["ab cd ab cd ab cd"]
-        super_merges = train_super_bpe_tokenizer(texts, num_merges=5, disconnected_merges=3)
-        boundless_merges = train_boundless_bpe_tokenizer(texts, num_merges=5)
+    def test_super_bpe_differs_from_boundless(self):
+        """Super BPE prioritizes intra-word merges; boundless picks by global frequency.
 
-        assert super_merges == [
+        With 'ab ac ab ac abcdefghik':
+        - Boundless merges cross-word 'ab ac' early (high frequency pair)
+        - Super forces intra-word merges first (consuming the long word),
+          then does cross-word merges later
+        """
+        texts = ["ab ac ab ac abcdefghik"]
+
+        boundless = train_boundless_bpe_tokenizer(texts, num_merges=10)
+        super_bpe = train_super_bpe_tokenizer(texts, num_merges=10, disconnected_merges=8)
+
+        assert boundless == [
+            (' ', 'a'),
+            (' a', 'c'),
+            (' a', 'b'),
             ('a', 'b'),
-            (' ', 'c'),
-            (' c', 'd'),
-            (' ', 'ab'),
-            (' cd', ' ab'),
+            ('ab', ' ac'),
+            ('ab ac', ' ab'),
+            (' ab', 'c'),
+            (' abc', 'd'),
+            (' abcd', 'e'),
+            (' abcde', 'f'),
         ]
-        assert super_merges == boundless_merges
+
+        assert super_bpe == [
+            (' ', 'a'),
+            (' a', 'c'),
+            (' a', 'b'),
+            ('a', 'b'),
+            (' ab', 'c'),
+            (' abc', 'd'),
+            (' abcd', 'e'),
+            (' abcde', 'f'),
+            ('ab', ' ac'),
+            ('ab ac', ' ab'),
+        ]
+
+        assert boundless[4] == ('ab', ' ac')
+        assert super_bpe[4] == (' ab', 'c')
 
     def test_default_split(self):
         """Default disconnected_merges should be num_merges // 2."""
