@@ -77,3 +77,12 @@ class TestTrainer:
         from complex_tokenization.graphs.units import characters
         graph = characters("שלום")
         assert bytes(graph) == "שלום".encode()
+
+    def test_on_merge_callback(self):
+        GraphSettings.MAX_MERGE_SIZE = 2
+        GraphSettings.ONLY_MINIMAL_MERGES = True
+        graph = utf8("abab")
+        trainer = Trainer(graph=graph)
+        calls = []
+        trainer.train(num_merges=2, on_merge=lambda step, total, token, nodes: calls.append(step))
+        assert calls == [1, 2]
