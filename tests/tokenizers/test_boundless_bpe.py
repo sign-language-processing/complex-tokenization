@@ -16,14 +16,27 @@ class TestBoundlessBPE:
         merges_boundless = train_boundless_bpe_tokenizer(texts, num_merges=5)
         assert merges_bounded != merges_boundless
 
-    def test_boundless_bpe_starts_same_as_bpe(self):
-        """First merges should be similar since intra-word pairs dominate."""
+    def test_large_boundless_bpe_expected_merges(self):
+        """Test actual merge values on the wikitext dataset, like test_bne does."""
         texts = list(text_dataset(max_samples=10))
-        merges_bpe = train_bpe_tokenizer(texts, num_merges=3)
-        merges_boundless = train_boundless_bpe_tokenizer(texts, num_merges=3)
-        assert merges_bpe[0] == merges_boundless[0]
+        merges = train_boundless_bpe_tokenizer(texts, num_merges=10)
 
-    def test_large_boundless_bpe(self):
+        expected = [
+            (" ", "t"),
+            (" ", "a"),
+            ("o", "n"),
+            ("h", "e"),
+            ("e", "s"),
+            ("e", "r"),
+            ("i", "n"),
+            (" t", "he"),
+            ("e", "d"),
+            ("a", "l"),
+        ]
+
+        assert merges == expected
+
+    def test_large_boundless_bpe_all_pairs(self):
         texts = list(text_dataset(max_samples=10))
         merges = train_boundless_bpe_tokenizer(texts, num_merges=10)
         assert len(merges) == 10
