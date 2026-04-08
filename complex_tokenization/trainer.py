@@ -1,4 +1,5 @@
 from collections import Counter
+from collections.abc import Callable
 from functools import reduce
 
 from complex_tokenization.draw import create_gif, draw_dot_content
@@ -20,7 +21,8 @@ class Trainer:
         self.graph = graph
         self.merges = []
 
-    def train(self, num_merges: int = 100, draw=False, verbose=False):
+    def train(self, num_merges: int = 100, draw=False, verbose=False,
+              on_merge: Callable[[int, int, "Node", tuple], None] | None = None):
         frames = []
 
         while True:
@@ -51,6 +53,9 @@ class Trainer:
 
             self.graph = self.graph.merge(token, nodes)
             self.merges.append((token, nodes))
+
+            if on_merge is not None:
+                on_merge(len(self.merges), num_merges, token, nodes)
 
         if draw:
             gif = create_gif(frames, save="example.gif")
