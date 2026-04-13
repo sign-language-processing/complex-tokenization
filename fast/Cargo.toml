@@ -1,0 +1,16 @@
+[package]
+name = "complex-tokenization"
+version = "0.0.1"
+edition = "2021"
+
+[lib]
+name = "complex_tokenization_rs"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+pyo3 = { version = "0.24", features = ["extension-module"] }
+unicode-segmentation = "1.12"
+regex = "1"
+rayon = "1"
+rustc-hash = "2"

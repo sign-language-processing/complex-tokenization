@@ -5,36 +5,26 @@ Trains on Chinese Wikipedia, plots token count reduction over merges.
 
 from itertools import islice
 
+from complex_tokenization_fast import BPETokenizer
+from complex_tokenization_fast.graphs.units import register_script
+from complex_tokenization_fast.languages.chinese.graph import chinese_character_to_graph
 from datasets import load_dataset
 
-from complex_tokenization import BPETokenizer
-from complex_tokenization.graphs.units import register_script
-from complex_tokenization.languages.chinese.graph import chinese_character_to_graph
-
-NUM_MERGES = 500
+NUM_MERGES = 6000
 
 
-def load_texts(n=10):
+def load_texts(n=100):
     ds = load_dataset(
         "wikimedia/wikipedia", "20231101.zh",
         split="train", streaming=True,
     )
-    return [row["text"][:500] for row in islice(ds, n) if row["text"]]
+    return [row["text"] for row in islice(ds, n) if row["text"]]
 
 
 def train_and_count(tok, texts, num_merges, sample_every=1):
     trainer = tok.make_trainer(texts)
-    xs = [0]
-    ys = [trainer.graph.node_count()]
-
-    for i in range(num_merges):
-        trainer.train(num_merges=i + 1)
-        merge_num = i + 1
-        if merge_num % sample_every == 0 or merge_num == num_merges:
-            xs.append(merge_num)
-            ys.append(trainer.graph.node_count())
-
-    return xs, ys
+    xs, ys = trainer.train_with_counts(num_merges, sample_every)
+    return list(xs), list(ys)
 
 
 def main():

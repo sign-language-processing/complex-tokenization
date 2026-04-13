@@ -1,0 +1,23 @@
+[project]
+name = "complex-tokenization-fast"
+description = "Fast Rust implementation of complex-tokenization"
+version = "0.0.1"
+dependencies = [
+    "regex",
+    "tokenizers",
+    "tqdm",
+]
+
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "complex_tokenization_fast._rs"
+python-source = "python"
+
+[tool.pytest.ini_options]
+testpaths = ["../tests"]
+confcutdir = "."
+timeout = 300

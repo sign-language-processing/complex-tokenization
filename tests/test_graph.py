@@ -60,9 +60,9 @@ class TestNodeCount:
 
     def test_node_count_with_chinese_ids(self):
         """Ensure node_count is correct when Chinese IDS decomposition is used."""
-        from complex_tokenization.tokenizer import BPETokenizer
         from complex_tokenization.graphs.units import register_script
         from complex_tokenization.languages.chinese.graph import chinese_character_to_graph
+        from complex_tokenization.tokenizer import BPETokenizer
 
         register_script("Han", chinese_character_to_graph)
         tok = BPETokenizer()
@@ -114,9 +114,9 @@ class TestNodeCount:
 
     def test_tree_merges_fire_with_chinese_ids(self):
         """After enough byte merges, tree merges should fire for Chinese IDS."""
-        from complex_tokenization.tokenizer import BPETokenizer
         from complex_tokenization.graphs.units import register_script
         from complex_tokenization.languages.chinese.graph import chinese_character_to_graph
+        from complex_tokenization.tokenizer import BPETokenizer
 
         register_script("Han", chinese_character_to_graph)
         tok = BPETokenizer()

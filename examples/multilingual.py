@@ -10,7 +10,8 @@ register_script("Han", chinese_character_to_graph)
 text = " ".join([
     "hello",            # English
     "Fu\u0308r",        # German: "Für" with decomposed umlaut
-    "\u05D1\u05BC\u05B0\u05E8\u05B5\u05D0\u05E9\u05C1\u05B4\u05BC\u05D9\u05EA",  # Hebrew: בְּרֵאשִׁ֖ית (Bereshit) with diacritics + cantillation
+    # Hebrew: בְּרֵאשִׁ֖ית (Bereshit) with diacritics + cantillation
+    "\u05D1\u05BC\u05B0\u05E8\u05B5\u05D0\u05E9\u05C1\u05B4\u05BC\u05D9\u05EA",
     "\u6797",           # Chinese: 林 (forest)
 ])
 
