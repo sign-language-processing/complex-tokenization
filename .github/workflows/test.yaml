@@ -10,7 +10,7 @@ on:
 
 jobs:
   test:
-    name: Test
+    name: Test Reference (Python)
     runs-on: ubuntu-latest
 
     steps:
@@ -28,3 +28,32 @@ jobs:
 
       - name: Test Code
         run: uv run pytest -n auto --dist loadscope
+
+  test-fast:
+    name: Test Fast (Rust)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6.5.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          activate-environment: true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: |
+          uv pip install ".[dev]"
+          uv pip install maturin
+
+      - name: Build fast package
+        working-directory: fast
+        run: maturin develop --release
+
+      - name: Test fast
+        working-directory: fast
+        run: uv run pytest ../tests/ -n auto --dist loadscope

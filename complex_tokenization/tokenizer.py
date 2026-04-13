@@ -63,7 +63,7 @@ class Tokenizer:
             for text in texts
         )
 
-    def train(self, texts: list[str], num_merges: int = 100, progress: bool = False) -> list[tuple[str, ...]]:
+    def make_trainer(self, texts: list[str]) -> Trainer:
         GraphSettings.ONLY_MINIMAL_MERGES = True
         GraphSettings.MAX_MERGE_SIZE = self.merge_size
 
@@ -76,9 +76,20 @@ class Tokenizer:
             trainer.graph = trainer.graph.merge(token, nodes)
             trainer.merges.append((token, nodes))
 
+        return trainer
+
+    def train(self, texts: list[str], num_merges: int = 100, progress: bool = False) -> list[tuple[str, ...]]:
+        trainer = self.make_trainer(texts)
+        _, merges = self.train_on_trainer(trainer, num_merges=num_merges, progress=progress)
+        return merges
+
+    def train_on_trainer(self, trainer: Trainer, num_merges: int = 100, progress: bool = False) -> tuple[Trainer, list[tuple[str, ...]]]:
+        GraphSettings.ONLY_MINIMAL_MERGES = True
+        GraphSettings.MAX_MERGE_SIZE = self.merge_size
+
         trainer.train(num_merges=num_merges, progress=progress)
         self.merges = trainer.get_merges()
-        return self.merges
+        return trainer, self.merges
 
     def get_merges(self) -> list[tuple[str, ...]]:
         return list(self.merges)

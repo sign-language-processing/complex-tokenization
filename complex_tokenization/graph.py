@@ -38,6 +38,9 @@ class GraphVertex:
     def merge(self, token, merge) -> "GraphVertex":
         raise NotImplementedError
 
+    def node_count(self) -> int:
+        raise NotImplementedError
+
 
 @dataclass(frozen=True, slots=True)
 class Node(GraphVertex):
@@ -51,6 +54,9 @@ class Node(GraphVertex):
 
     def merge(self, token: "Node", merge: tuple):
         return self
+
+    def node_count(self) -> int:
+        return 1
 
     def __eq__(self, other):
         if not isinstance(other, Node):
@@ -97,6 +103,9 @@ class NodesSequence(GraphVertex):
                 if only_minimal and not isinstance(nodes[j - 1], Node):
                     break
                 yield (nodes[i], nodes[j - 1]) if j - i == 2 else tuple(nodes[i:j])
+
+    def node_count(self) -> int:
+        return sum(n.node_count() for n in self.nodes)
 
     def merge(self, token: Node, merge: tuple["GraphVertex", ...]):
         m = len(merge)
@@ -182,6 +191,9 @@ class Tree(GraphVertex):
         for child in self.children:
             yield from child.get_merges()
 
+    def node_count(self) -> int:
+        return self.root.node_count() + sum(c.node_count() for c in self.children)
+
     def merge(self, token: Node, nodes: tuple):
         if nodes[0] == self.root:
             if len(nodes) == len(self.children) + 1:
@@ -223,6 +235,9 @@ class FullyConnectedGraph(GraphVertex):
                 if i != j:
                     yield (self.nodes[i], self.nodes[j])
 
+    def node_count(self) -> int:
+        return sum(n.node_count() for n in self.nodes)
+
     def merge(self, token: Node, merge: tuple):
         remaining = list(self.nodes)
         if len(merge) == 2:
@@ -262,8 +277,22 @@ class FullyConnectedGraph(GraphVertex):
 class UnconnectedGraphs(GraphVertex):
     subgraphs: tuple[GraphVertex, ...]
 
+    def __post_init__(self):
+        # Flatten nested UnconnectedGraphs so all subgraphs are at one level.
+        # Uses object.__setattr__ because the dataclass is frozen.
+        flat = []
+        for sg in self.subgraphs:
+            if isinstance(sg, UnconnectedGraphs):
+                flat.extend(sg.subgraphs)
+            else:
+                flat.append(sg)
+        object.__setattr__(self, 'subgraphs', tuple(flat))
+
     def __bytes__(self):
         raise Exception("Cannot convert UnconnectedGraphs to bytes")
+
+    def node_count(self) -> int:
+        return sum(sg.node_count() for sg in self.subgraphs)
 
     def merge(self, token: Node, merge: tuple):
         old = self.subgraphs

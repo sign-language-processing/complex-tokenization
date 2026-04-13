@@ -15,6 +15,119 @@ def readable_merges(graph: GraphVertex):
     return byte_merges
 
 
+class TestNodeCount:
+    def test_single_node(self):
+        assert Node(b'a').node_count() == 1
+
+    def test_utf8_bytes(self):
+        graph = utf8("abc")
+        assert graph.node_count() == 3
+
+    def test_utf8_clusters(self):
+        graph = utf8_clusters("שלום")
+        assert graph.node_count() == 8  # 4 chars × 2 bytes each
+
+    def test_words(self):
+        graph = words("hi bye")
+        assert graph.node_count() == 6  # h, i, ' ', b, y, e
+
+    def test_after_merge(self):
+        graph = utf8("aabb")
+        assert graph.node_count() == 4
+        merged = graph.merge(Node(b'aa'), (Node(b'a'), Node(b'a')))
+        assert merged.node_count() == 3  # aa, b, b
+
+    def test_node_count_matches_train_with_counts(self):
+        """Ensure train_with_counts reports the same node_count as graph.node_count()."""
+        from complex_tokenization.tokenizer import BPETokenizer
+
+        tok = BPETokenizer()
+        texts = ["the teacher teaches the thick thing"] * 3
+        trainer = tok.make_trainer(texts)
+        initial = trainer.graph.node_count()
+
+        if hasattr(trainer, 'train_with_counts'):
+            xs, ys = trainer.train_with_counts(5, 1)
+            assert ys[0] == initial, f"Initial count mismatch: {ys[0]} != {initial}"
+
+            # Also check after training via the normal path
+            tok2 = BPETokenizer()
+            trainer2 = tok2.make_trainer(texts)
+            trainer2, _ = tok2.train_on_trainer(trainer2, num_merges=5)
+            after_normal = trainer2.graph.node_count()
+            assert ys[5] == after_normal, f"After 5 merges mismatch: {ys[5]} != {after_normal}"
+
+
+    def test_node_count_with_chinese_ids(self):
+        """Ensure node_count is correct when Chinese IDS decomposition is used."""
+        from complex_tokenization.tokenizer import BPETokenizer
+        from complex_tokenization.graphs.units import register_script
+        from complex_tokenization.languages.chinese.graph import chinese_character_to_graph
+
+        register_script("Han", chinese_character_to_graph)
+        tok = BPETokenizer()
+        texts = ["林森木本末"] * 3
+        trainer = tok.make_trainer(texts)
+        initial = trainer.graph.node_count()
+        assert initial > 0
+
+        if hasattr(trainer, 'train_with_counts'):
+            xs, ys = trainer.train_with_counts(5, 1)
+            assert ys[0] == initial
+
+            tok2 = BPETokenizer()
+            trainer2 = tok2.make_trainer(texts)
+            for i in range(1, 6):
+                trainer2, _ = tok2.train_on_trainer(trainer2, num_merges=i)
+                assert ys[i] == trainer2.graph.node_count(), \
+                    f"Merge {i}: train_with_counts={ys[i]} vs train_on_trainer={trainer2.graph.node_count()}"
+
+    def test_collapsed_trees_merge_as_pairs(self):
+        """After tree merges collapse Trees to Nodes in a MixedSeq, they should become
+        eligible for pair merges at the parent Seq level."""
+        from complex_tokenization.graph import Node, NodesSequence, Tree, UnconnectedGraphs
+        from complex_tokenization.graphs.settings import GraphSettings
+        GraphSettings.MAX_MERGE_SIZE = 2
+        GraphSettings.ONLY_MINIMAL_MERGES = True
+
+        c1 = Tree(root=NodesSequence((Node(b'\xe2'), Node(b'\xbf'), Node(b'\xb1'))),
+                  children=(NodesSequence((Node(b'\xe4'), Node(b'\xb8'), Node(b'\xb6'))),
+                            NodesSequence((Node(b'\xe4'), Node(b'\xb8'), Node(b'\x80')))))
+        c2 = Tree(root=NodesSequence((Node(b'\xe2'), Node(b'\xbf'), Node(b'\xb0'))),
+                  children=(NodesSequence((Node(b'\xe6'), Node(b'\x9c'), Node(b'\xa8'))),
+                            NodesSequence((Node(b'\xe6'), Node(b'\x9c'), Node(b'\xa8')))))
+        word = NodesSequence((c1, c2))
+        ug = UnconnectedGraphs((word,) * 100)
+
+        # Use the Tokenizer API to ensure settings are synced
+        from complex_tokenization.tokenizer import BPETokenizer
+        tok = BPETokenizer()
+        tok.merges = []
+        from complex_tokenization.trainer import Trainer
+        trainer = Trainer(graph=ug)
+        trainer.train(num_merges=30)
+        merges = trainer.get_merges()
+        # After byte merges + tree merges + final pair merge: 100 nodes (one per word)
+        assert len(merges) >= 11, f"Expected at least 11 merges, got {len(merges)}"
+        assert trainer.graph.node_count() == 100, \
+            f"Expected 100 nodes, got {trainer.graph.node_count()}"
+
+    def test_tree_merges_fire_with_chinese_ids(self):
+        """After enough byte merges, tree merges should fire for Chinese IDS."""
+        from complex_tokenization.tokenizer import BPETokenizer
+        from complex_tokenization.graphs.units import register_script
+        from complex_tokenization.languages.chinese.graph import chinese_character_to_graph
+
+        register_script("Han", chinese_character_to_graph)
+        tok = BPETokenizer()
+        # 亮 = ⿱(丶, 一) — after byte merges reduce ⿱/丶/一 to single Nodes, tree merge fires
+        texts = ["亮亮亮亮亮亮亮亮亮亮"] * 5
+        merges = tok.train(texts, num_merges=20)
+        # At least one merge should be a tree merge (len > 2)
+        tree_merges = [m for m in merges if len(m) > 2]
+        assert len(tree_merges) > 0, f"Expected tree merges in {merges}"
+
+
 class TestUnitsWord:
     def test_characters_split(self):
         assert characters("שלום") == NodesSequence((
