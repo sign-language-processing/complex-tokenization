@@ -28,16 +28,22 @@ def train_and_count(tok, texts, num_merges, sample_every=1):
 
 
 def main():
+    import time
+
     print("Loading data...")
     texts = load_texts()
     sample_every = max(1, NUM_MERGES // 100)
 
     print(f"Training Standard BPE ({NUM_MERGES} merges)...")
+    t0 = time.time()
     std_x, std_y = train_and_count(BPETokenizer(), texts, NUM_MERGES, sample_every)
+    print(f"  Done in {time.time() - t0:.1f}s")
 
     print(f"Training BPE + Chinese IDS ({NUM_MERGES} merges)...")
+    t0 = time.time()
     register_script("Han", chinese_character_to_graph)
     cn_x, cn_y = train_and_count(BPETokenizer(), texts, NUM_MERGES, sample_every)
+    print(f"  Done in {time.time() - t0:.1f}s")
 
     print(f"\n{'Merge':>6s}  {'Std BPE':>10s}  {'BPE+IDS':>10s}")
     for i in range(min(len(std_x), len(cn_x))):

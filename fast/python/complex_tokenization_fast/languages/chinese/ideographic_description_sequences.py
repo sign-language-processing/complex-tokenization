@@ -141,6 +141,8 @@ def load_characters_dictionary():
 def reversed_characters_dictionary():
     dictionary = load_characters_dictionary()
     reversed_dict = {v: k for k, v in dictionary.items()}
+    from complex_tokenization_fast._rs import set_ids_reverse_dict_py
+    set_ids_reverse_dict_py(reversed_dict)
     return reversed_dict
 
 

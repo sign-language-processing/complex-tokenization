@@ -19,6 +19,9 @@ fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(units::register_script, m)?)?;
     m.add_function(wrap_pyfunction!(units::clear_handlers, m)?)?;
     m.add_function(wrap_pyfunction!(units::get_handlers_dict, m)?)?;
+    m.add_function(wrap_pyfunction!(units::set_ids_reverse_dict_py, m)?)?;
+    m.add_function(wrap_pyfunction!(units::warm_word_cache_py, m)?)?;
+    m.add_function(wrap_pyfunction!(units::clear_word_cache, m)?)?;
     m.add_function(wrap_pyfunction!(sync_settings, m)?)?;
     Ok(())
 }

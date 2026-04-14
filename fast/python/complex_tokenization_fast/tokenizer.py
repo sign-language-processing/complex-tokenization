@@ -52,6 +52,28 @@ class Tokenizer:
 
         return trainer
 
+    def make_streaming_trainer(self, texts):
+        GraphSettings.ONLY_MINIMAL_MERGES = True
+        GraphSettings.MAX_MERGE_SIZE = self.merge_size
+
+        from complex_tokenization_fast._rs import clear_word_cache, warm_word_cache_py
+        from complex_tokenization_fast.graphs.words import pretokenize
+
+        clear_word_cache()
+        doc_words = [pretokenize(text, self.pretokenizer) for text in texts]
+        all_unique_words = list({w for words in doc_words for w in words})
+        warm_word_cache_py(all_unique_words)
+
+        trainer = Trainer(graph=Node(value=b""))
+        trainer.set_streaming(doc_words, connected=self.connected)
+
+        for merge_strs in self.merges:
+            nodes = tuple(Node(value=s.encode("utf-8")) for s in merge_strs)
+            token = reduce(lambda a, b: a + b, nodes)
+            trainer.apply_merge(token, nodes)
+
+        return trainer
+
     def train(self, texts, num_merges=100, progress=False):
         trainer = self.make_trainer(texts)
         _, merges = self.train_on_trainer(trainer, num_merges=num_merges, progress=progress)

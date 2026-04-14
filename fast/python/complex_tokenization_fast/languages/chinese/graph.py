@@ -7,7 +7,10 @@ from complex_tokenization_fast.languages.chinese.ideographic_description_sequenc
     IDSNode,
     get_ids_for_character,
     parse_ideographic_description_sequences,
+    reversed_characters_dictionary,
 )
+
+reversed_characters_dictionary()
 
 
 def ids_node_to_graph(node: IDSNode):

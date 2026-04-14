@@ -28,6 +28,11 @@ pub fn set_ids_reverse_dict(dict: HashMap<String, String>) {
 }
 
 #[pyfunction]
+pub fn set_ids_reverse_dict_py(dict: HashMap<String, String>) {
+    set_ids_reverse_dict(dict);
+}
+
+#[pyfunction]
 pub fn register_script(py: Python<'_>, script: String, handler: PyObject) -> PyResult<()> {
     let pattern = format!(r"\p{{{script}}}");
     let re = regex::Regex::new(&pattern).map_err(|e| {
@@ -45,6 +50,52 @@ pub fn register_script(py: Python<'_>, script: String, handler: PyObject) -> PyR
 pub fn clear_handlers() {
     CLUSTER_HANDLERS.lock().unwrap().clear();
     CLUSTER_CACHE.lock().unwrap().clear();
+}
+
+pub fn apply_merge_to_cluster_cache(token: &GraphV, merge: &[GraphV]) {
+    let mut cache = CLUSTER_CACHE.lock().unwrap();
+    for graph in cache.values_mut() {
+        if let Some(new_g) = graph.try_merge(token, merge) {
+            *graph = new_g;
+        }
+    }
+}
+
+static WORD_CACHE: LazyLock<Mutex<HashMap<String, GraphV>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub fn snapshot_word_cache() -> HashMap<String, GraphV> {
+    WORD_CACHE.lock().unwrap().clone()
+}
+
+pub fn replace_word_cache(new_cache: HashMap<String, GraphV>) {
+    let mut cache = WORD_CACHE.lock().unwrap();
+    *cache = new_cache;
+}
+
+pub fn warm_word_cache(py: Python<'_>, word: &str) -> PyResult<()> {
+    {
+        let cache = WORD_CACHE.lock().unwrap();
+        if cache.contains_key(word) {
+            return Ok(());
+        }
+    }
+    let g = utf8_clusters_inner(py, word)?;
+    WORD_CACHE.lock().unwrap().insert(word.to_string(), g);
+    Ok(())
+}
+
+#[pyfunction]
+pub fn warm_word_cache_py(py: Python<'_>, words: Vec<String>) -> PyResult<()> {
+    for w in &words {
+        warm_word_cache(py, w)?;
+    }
+    Ok(())
+}
+
+#[pyfunction]
+pub fn clear_word_cache() {
+    WORD_CACHE.lock().unwrap().clear();
 }
 
 #[pyfunction]
