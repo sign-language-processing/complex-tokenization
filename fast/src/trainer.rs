@@ -43,7 +43,13 @@ fn make_token(nodes: &[GraphV]) -> GraphV {
         .fold(nodes[0].clone(), |acc, n| acc.add(n))
 }
 
-fn count_merges_parallel(subs: &[GraphV], active: &[bool]) -> FxHashMap<Vec<GraphV>, usize> {
+fn count_merges_into(
+    subs: &[GraphV],
+    active: &[bool],
+    global: &mut FxHashMap<Vec<GraphV>, usize>,
+) {
+    global.clear();
+
     let n_threads = rayon::current_num_threads().max(1);
     let chunk_size = (subs.len() / n_threads).max(1);
 
@@ -62,15 +68,11 @@ fn count_merges_parallel(subs: &[GraphV], active: &[bool]) -> FxHashMap<Vec<Grap
         })
         .collect();
 
-    let total: usize = chunk_maps.iter().map(|m| m.len()).sum();
-    let mut global: FxHashMap<Vec<GraphV>, usize> =
-        FxHashMap::with_capacity_and_hasher(total, Default::default());
     for partial in chunk_maps {
         for (merge, count) in partial {
             *global.entry(merge).or_insert(0) += count;
         }
     }
-    global
 }
 
 fn apply_merge_parallel(
@@ -79,11 +81,12 @@ fn apply_merge_parallel(
     token: &GraphV,
     merge: &[GraphV],
 ) {
+    let first_node = &merge[0];
     let changes: Vec<(usize, GraphV)> = subs
         .par_iter()
         .enumerate()
         .filter_map(|(i, sg)| {
-            if !active[i] {
+            if !active[i] || !sg.contains_node(first_node) {
                 return None;
             }
             sg.try_merge(token, merge).map(|new_sg| (i, new_sg))
@@ -114,22 +117,6 @@ fn flatten_unconn(g: GraphV) -> GraphV {
     }
 }
 
-fn do_merge_step(
-    subs: &mut [GraphV],
-    active: &mut [bool],
-    verbose: bool,
-) -> Option<(GraphV, Vec<GraphV>)> {
-    let counts = count_merges_parallel(subs, active);
-    let (nodes, count) = pick_best(&counts)?;
-    let token = make_token(&nodes);
-    if verbose {
-        println!("Merging {:?} count={}", nodes, count);
-    }
-    apply_merge_parallel(subs, active, &token, &nodes);
-    apply_merge_to_cluster_cache(&token, &nodes);
-    Some((token, nodes))
-}
-
 fn train_unconn(
     subs: &mut Vec<GraphV>,
     range_start: usize,
@@ -141,12 +128,20 @@ fn train_unconn(
         .map(|sg| !matches!(sg, GraphV::Node(_)))
         .collect();
     let mut pending = Vec::new();
+    let mut counts: FxHashMap<Vec<GraphV>, usize> = FxHashMap::default();
 
     for _ in range_start..num_merges {
-        match do_merge_step(subs, &mut active, verbose) {
-            Some(merge) => pending.push(merge),
-            None => break,
+        count_merges_into(subs, &active, &mut counts);
+        let Some((nodes, count)) = pick_best(&counts) else {
+            break;
+        };
+        let token = make_token(&nodes);
+        if verbose {
+            println!("Merging {:?} count={}", nodes, count);
         }
+        apply_merge_parallel(subs, &mut active, &token, &nodes);
+        apply_merge_to_cluster_cache(&token, &nodes);
+        pending.push((token, nodes));
     }
     pending
 }
@@ -231,6 +226,34 @@ fn build_doc_graph(words: &[String], cache: &HashMap<String, GraphV>, connected:
     }
 }
 
+fn build_global_counts(entries: &[WordEntry]) -> FxHashMap<Vec<GraphV>, usize> {
+    let n_threads = rayon::current_num_threads().max(1);
+    let chunk_size = (entries.len() / n_threads).max(1);
+
+    let chunk_maps: Vec<FxHashMap<Vec<GraphV>, usize>> = entries
+        .par_chunks(chunk_size)
+        .map(|chunk| {
+            let mut local: FxHashMap<Vec<GraphV>, usize> = FxHashMap::default();
+            for entry in chunk {
+                for (merge, &count) in &entry.candidates {
+                    *local.entry(merge.clone()).or_insert(0) += count * entry.freq;
+                }
+            }
+            local
+        })
+        .collect();
+
+    let total: usize = chunk_maps.iter().map(|m| m.len()).sum();
+    let mut global: FxHashMap<Vec<GraphV>, usize> =
+        FxHashMap::with_capacity_and_hasher(total, Default::default());
+    for partial in chunk_maps {
+        for (merge, count) in partial {
+            *global.entry(merge).or_insert(0) += count;
+        }
+    }
+    global
+}
+
 // Disconnected: use word-level candidate caching (no graph assembly)
 fn train_streaming_disconnected(
     entries: &mut Vec<WordEntry>,
@@ -239,34 +262,9 @@ fn train_streaming_disconnected(
     verbose: bool,
 ) -> Vec<(GraphV, Vec<GraphV>)> {
     let mut pending = Vec::new();
+    let mut global = build_global_counts(entries);
 
     for _ in range_start..num_merges {
-        // Aggregate cached candidates × freq (parallel)
-        let n_threads = rayon::current_num_threads().max(1);
-        let chunk_size = (entries.len() / n_threads).max(1);
-
-        let chunk_maps: Vec<FxHashMap<Vec<GraphV>, usize>> = entries
-            .par_chunks(chunk_size)
-            .map(|chunk| {
-                let mut local: FxHashMap<Vec<GraphV>, usize> = FxHashMap::default();
-                for entry in chunk {
-                    for (merge, &count) in &entry.candidates {
-                        *local.entry(merge.clone()).or_insert(0) += count * entry.freq;
-                    }
-                }
-                local
-            })
-            .collect();
-
-        let total: usize = chunk_maps.iter().map(|m| m.len()).sum();
-        let mut global: FxHashMap<Vec<GraphV>, usize> =
-            FxHashMap::with_capacity_and_hasher(total, Default::default());
-        for partial in chunk_maps {
-            for (merge, count) in partial {
-                *global.entry(merge).or_insert(0) += count;
-            }
-        }
-
         let Some((nodes, count)) = pick_best(&global) else {
             break;
         };
@@ -281,6 +279,9 @@ fn train_streaming_disconnected(
                 entry.apply_merge(&token, &nodes);
             }
         });
+
+        // Rebuild global counts (parallel)
+        global = build_global_counts(entries);
 
         pending.push((token, nodes));
     }
@@ -386,7 +387,6 @@ fn train_streaming_with_counts(
 
     if !connected {
         let mut entries = build_word_entries(doc_words, &cache);
-        let word_freqs: Vec<usize> = entries.iter().map(|e| e.freq).collect();
 
         let node_count = |entries: &[WordEntry]| -> usize {
             entries.par_iter().map(|e| e.graph.node_count() * e.freq).sum()
@@ -397,31 +397,7 @@ fn train_streaming_with_counts(
         let mut ys = vec![node_count(&entries)];
 
         for i in range_start..num_merges {
-            let n_threads = rayon::current_num_threads().max(1);
-            let chunk_size = (entries.len() / n_threads).max(1);
-
-            let chunk_maps: Vec<FxHashMap<Vec<GraphV>, usize>> = entries
-                .par_chunks(chunk_size)
-                .map(|chunk| {
-                    let mut local: FxHashMap<Vec<GraphV>, usize> = FxHashMap::default();
-                    for entry in chunk {
-                        for (merge, &count) in &entry.candidates {
-                            *local.entry(merge.clone()).or_insert(0) += count * entry.freq;
-                        }
-                    }
-                    local
-                })
-                .collect();
-
-            let total: usize = chunk_maps.iter().map(|m| m.len()).sum();
-            let mut global: FxHashMap<Vec<GraphV>, usize> =
-                FxHashMap::with_capacity_and_hasher(total, Default::default());
-            for partial in chunk_maps {
-                for (merge, count) in partial {
-                    *global.entry(merge).or_insert(0) += count;
-                }
-            }
-
+            let global = build_global_counts(&entries);
             let Some((nodes, _)) = pick_best(&global) else { break };
             let token = make_token(&nodes);
 
@@ -637,23 +613,30 @@ impl Trainer {
                     .iter()
                     .map(|sg| !matches!(sg, GraphV::Node(_)))
                     .collect();
+                let mut counts: FxHashMap<Vec<GraphV>, usize> = FxHashMap::default();
 
                 for i in range_start..num_merges {
-                    match do_merge_step(subs, &mut active, false) {
-                        Some((token, nodes)) => pending.push((token, nodes)),
-                        None => break,
-                    }
+                    count_merges_into(subs, &active, &mut counts);
+                    let Some((nodes, count)) = pick_best(&counts) else {
+                        break;
+                    };
+                    let token = make_token(&nodes);
+                    if false { let _ = count; }
+                    apply_merge_parallel(subs, &mut active, &token, &nodes);
+                    apply_merge_to_cluster_cache(&token, &nodes);
+                    pending.push((token, nodes));
 
                     let merge_num = i + 1;
                     if merge_num % sample_every == 0 || merge_num == num_merges {
-                        let count: usize = subs.iter().map(|sg| sg.node_count()).sum();
+                        let nc: usize = subs.iter().map(|sg| sg.node_count()).sum();
                         xs.push(merge_num);
-                        ys.push(count);
+                        ys.push(nc);
                     }
                 }
             } else {
+                let mut counts: FxHashMap<Vec<GraphV>, usize> = FxHashMap::default();
                 for i in range_start..num_merges {
-                    let mut counts: FxHashMap<Vec<GraphV>, usize> = FxHashMap::default();
+                    counts.clear();
                     graph.emit_merges(&mut |m| *counts.entry(m).or_insert(0) += 1);
                     let Some((nodes, _)) = pick_best(&counts) else {
                         break;
