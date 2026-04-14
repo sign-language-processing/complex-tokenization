@@ -228,6 +228,17 @@ fn seq_emit_merges(nodes: &[GraphV], emit: &mut dyn FnMut(Vec<GraphV>)) {
     let only_minimal = ONLY_MINIMAL_MERGES.load(Ordering::Relaxed);
     let max_size = MAX_MERGE_SIZE.load(Ordering::Relaxed);
 
+    // Fast path for BPE: only_minimal + max_size==2, all nodes are Node
+    if only_minimal && max_size == 2 {
+        let all_nodes = nodes.iter().all(|n| n.is_node());
+        if all_nodes {
+            for i in 0..num_nodes.saturating_sub(1) {
+                emit(vec![nodes[i].clone(), nodes[i + 1].clone()]);
+            }
+            return;
+        }
+    }
+
     for i in 0..num_nodes {
         match &nodes[i] {
             GraphV::Node(_) => {}

@@ -617,11 +617,10 @@ impl Trainer {
 
                 for i in range_start..num_merges {
                     count_merges_into(subs, &active, &mut counts);
-                    let Some((nodes, count)) = pick_best(&counts) else {
+                    let Some((nodes, _)) = pick_best(&counts) else {
                         break;
                     };
                     let token = make_token(&nodes);
-                    if false { let _ = count; }
                     apply_merge_parallel(subs, &mut active, &token, &nodes);
                     apply_merge_to_cluster_cache(&token, &nodes);
                     pending.push((token, nodes));
