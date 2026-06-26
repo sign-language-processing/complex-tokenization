@@ -304,7 +304,10 @@ class UnconnectedGraphs(GraphVertex):
 
     def __post_init__(self):
         # Flatten nested UnconnectedGraphs so all subgraphs are at one level.
-        # Uses object.__setattr__ because the dataclass is frozen.
+        # Skip the rebuild when nothing is nested (the common case, e.g. every
+        # merge step). Uses object.__setattr__ because the dataclass is frozen.
+        if not any(isinstance(sg, UnconnectedGraphs) for sg in self.subgraphs):
+            return
         flat = []
         for sg in self.subgraphs:
             if isinstance(sg, UnconnectedGraphs):
