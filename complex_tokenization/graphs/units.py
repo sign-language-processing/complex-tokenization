@@ -35,9 +35,15 @@ def characters(s: str) -> GraphVertex:
     return NodesSequence(nodes=tuple(nodes))
 
 
+# There are only 256 single-byte values; share one immutable Node per byte
+# instead of allocating a fresh one each time. Dedups the whole leaf layer
+# (memory) and lets equal bytes compare by identity (speeds merge scans).
+_BYTE_NODES = [Node(bytes([b])) for b in range(256)]
+
+
 def utf8(s: str) -> GraphVertex:
     bytes_array = s.encode("utf-8")
-    nodes = [Node(bytes([b])) for b in bytes_array]
+    nodes = [_BYTE_NODES[b] for b in bytes_array]
     if len(nodes) == 1:
         return nodes[0]
     return NodesSequence(nodes=tuple(nodes))
