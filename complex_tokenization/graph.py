@@ -116,6 +116,8 @@ class NodesSequence(GraphVertex):
 
         first = merge[0]
         while i <= n - m:
+            # Check the first node before slicing: it fails at most positions,
+            # so we avoid allocating the nodes[i:i + m] tuple in the common case.
             if nodes[i] == first and nodes[i:i + m] == merge:
                 out.append(token)
                 i += m
