@@ -1,5 +1,6 @@
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
+from itertools import chain
 
 from complex_tokenization.graphs.settings import GraphSettings
 from complex_tokenization.languages.chinese.ideographic_description_sequences import get_character_for_ids
@@ -341,8 +342,7 @@ class UnconnectedGraphs(GraphVertex):
         return UnconnectedGraphs(subgraphs=new)
 
     def get_merges(self) -> Iterator[tuple]:
-        for subgraph in self.subgraphs:
-            yield from subgraph.get_merges()
+        return chain.from_iterable(sg.get_merges() for sg in self.subgraphs)
 
     def dot(self, level=0) -> Iterable[str]:
         for subgraph in self.subgraphs:
