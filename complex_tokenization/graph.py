@@ -1,5 +1,5 @@
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from complex_tokenization.graphs.settings import GraphSettings
 from complex_tokenization.languages.chinese.ideographic_description_sequences import get_character_for_ids
@@ -15,6 +15,10 @@ def dot_escape(s: str) -> str:
 
 
 class GraphVertex:
+    # Empty slots so the slotted subclasses below actually suppress __dict__;
+    # without this, a non-slotted base hands every node an unused __dict__.
+    __slots__ = ()
+
     def __bytes__(self):
         raise NotImplementedError
 
@@ -80,6 +84,8 @@ class Node(GraphVertex):
 @dataclass(frozen=True, slots=True)
 class NodesSequence(GraphVertex):
     nodes: tuple[GraphVertex, ...]
+    # memo slot for get_merges; excluded from eq/hash/repr (see get_merges)
+    _merges: tuple | None = field(default=None, init=False, compare=False, repr=False)
 
     def __bytes__(self):
         buffer = bytearray()
