@@ -114,8 +114,9 @@ class NodesSequence(GraphVertex):
         out: list[GraphVertex] = []
         i = 0
 
+        first = merge[0]
         while i <= n - m:
-            if nodes[i:i + m] == merge:
+            if nodes[i] == first and nodes[i:i + m] == merge:
                 out.append(token)
                 i += m
             else:
