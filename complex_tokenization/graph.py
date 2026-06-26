@@ -132,16 +132,22 @@ class NodesSequence(GraphVertex):
         return sum(n.node_count() for n in self.nodes)
 
     def merge(self, token: Node, merge: tuple["GraphVertex", ...]):
-        m = len(merge)
         nodes = self.nodes
+
+        # _merges (when memoized) lists every mergeable subsequence in this
+        # subtree, so if the merge isn't among them nothing here changes.
+        cached = getattr(self, "_merges", None)
+        if cached is not None and merge not in cached:
+            return self
+
+        m = len(merge)
         n = len(nodes)
+        first = merge[0]
         out: list[GraphVertex] = []
         i = 0
-
-        first = merge[0]
         while i <= n - m:
-            # Check the first node before slicing: it fails at most positions,
-            # so we avoid allocating the nodes[i:i + m] tuple in the common case.
+            # First-node guard before slicing (see #29): skips the nodes[i:i + m]
+            # allocation at the many positions that can't start the merge.
             if nodes[i] == first and nodes[i:i + m] == merge:
                 out.append(token)
                 i += m
@@ -152,8 +158,7 @@ class NodesSequence(GraphVertex):
 
         if len(out) == 1:
             return out[0]
-
-        merged_nodes = tuple(n.merge(token, merge) for n in out)
+        merged_nodes = tuple(node.merge(token, merge) for node in out)
         if merged_nodes == nodes:
             return self
         return NodesSequence(merged_nodes)
