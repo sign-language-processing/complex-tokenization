@@ -127,6 +127,8 @@ class NodesSequence(GraphVertex):
             return out[0]
 
         merged_nodes = tuple(n.merge(token, merge) for n in out)
+        if merged_nodes == nodes:
+            return self
         return NodesSequence(merged_nodes)
 
     def dot(self, level=0) -> Iterable[str]:
@@ -202,6 +204,8 @@ class Tree(GraphVertex):
 
         root = self.root.merge(token, nodes)
         children = tuple(child.merge(token, nodes) for child in self.children)
+        if root == self.root and children == self.children:
+            return self
         return Tree(root=root, children=children)
 
     def __bytes__(self):
