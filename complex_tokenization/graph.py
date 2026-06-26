@@ -87,6 +87,19 @@ class NodesSequence(GraphVertex):
         return self.nodes[0].oid
 
     def get_merges(self):
+        if not GraphSettings.TRADE_MEMORY_FOR_SPEED:
+            return self._iter_merges()
+        # Memoize: get_merges is a pure function of an immutable node, and merge
+        # returns self for unchanged subtrees, so the same objects recur across
+        # merges and a full re-walk becomes a cache hit. Valid while GraphSettings
+        # is fixed, which holds for a node's lifetime during training.
+        cached = getattr(self, "_merges", None)
+        if cached is None:
+            cached = tuple(self._iter_merges())
+            object.__setattr__(self, "_merges", cached)
+        return cached
+
+    def _iter_merges(self):
         nodes = self.nodes
         num_nodes = len(nodes)
         only_minimal = GraphSettings.ONLY_MINIMAL_MERGES
