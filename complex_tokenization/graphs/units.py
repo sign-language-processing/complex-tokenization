@@ -50,7 +50,8 @@ def utf8(s: str) -> GraphVertex:
 
 
 def utf8_clusters(s: str) -> GraphVertex:
-    clusters = regex.findall(r'\X', s)
+    # ASCII has no multi-codepoint grapheme clusters, so skip the \X regex.
+    clusters = list(s) if s.isascii() else regex.findall(r'\X', s)
     nodes = []
     for cluster in clusters:
         handler = _get_handler(cluster)
