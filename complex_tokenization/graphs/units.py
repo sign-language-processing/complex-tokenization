@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from functools import cache
 
 import regex
 
@@ -27,8 +28,16 @@ def _get_handler(cluster: str) -> Callable[[str], GraphVertex] | None:
     return None
 
 
+# Share one immutable Node per character (like _BYTE_NODES for bytes, but
+# unbounded so cached lazily): dedups repeated characters and lets equal ones
+# compare by identity. Nodes are frozen, so sharing is safe.
+@cache
+def _char_node(char: str) -> Node:
+    return Node(char.encode("utf-8"))
+
+
 def characters(s: str) -> GraphVertex:
-    nodes = [Node(c.encode("utf-8")) for c in s]
+    nodes = [_char_node(c) for c in s]
 
     if len(nodes) == 1:
         return nodes[0]
