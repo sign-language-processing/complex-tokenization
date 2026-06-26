@@ -6,6 +6,12 @@ from complex_tokenization.graph import GraphVertex, Tree, UnconnectedGraphs
 from complex_tokenization.graphs.units import utf8
 
 
+def _merge_score(item):
+    # item is a (nodes, count) pair; merging a k-tuple removes k-1 nodes.
+    nodes, count = item
+    return (len(nodes) - 1) * count
+
+
 class Trainer:
     def __init__(self, graph: GraphVertex | None = None, graphs: tuple[GraphVertex, ...] | None = None):
         if graphs is None and graph is None:
@@ -39,7 +45,7 @@ class Trainer:
             if not counts:
                 break
 
-            nodes = max(counts, key=lambda k: (len(k) - 1) * counts[k])
+            nodes = max(counts.items(), key=_merge_score)[0]
 
             if verbose:
                 print("Merging", nodes, "count=", counts[nodes])
