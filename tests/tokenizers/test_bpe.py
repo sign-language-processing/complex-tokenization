@@ -1,3 +1,4 @@
+from complex_tokenization.graphs.settings import GraphSettings
 from complex_tokenization.tokenizer import BPETokenizer
 from tests.utils import text_dataset, train_huggingface_tokenizer
 
@@ -34,3 +35,11 @@ class TestBPE:
             ("e", "r"), ("i", "n"), (" t", "he"), ("e", "d"), ("a", "l"),
         ]
         assert merges == expected
+
+    def test_memoization_matches_unmemoized(self):
+        texts = list(text_dataset(max_samples=10))
+        GraphSettings.TRADE_MEMORY_FOR_SPEED = False
+        plain = BPETokenizer().train(texts, num_merges=20)
+        GraphSettings.TRADE_MEMORY_FOR_SPEED = True
+        memoized = BPETokenizer().train(texts, num_merges=20)
+        assert memoized == plain
