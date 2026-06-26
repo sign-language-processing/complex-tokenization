@@ -63,6 +63,11 @@ class Node(GraphVertex):
             return False
         return self.value == other.value
 
+    def __hash__(self):
+        # hash(bytes) is cached by CPython; the dataclass default hash((value,))
+        # rebuilds and rehashes a 1-tuple on every call.
+        return hash(self.value)
+
     def __add__(self, other):
         if isinstance(other, NodesSequence):
             return NodesSequence(tuple([self]) + other.nodes)
