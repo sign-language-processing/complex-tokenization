@@ -56,6 +56,14 @@ class TestTokenizerAPI:
         tok = Tokenizer()
         assert tok.get_merges() == []
 
+    def test_cache_maxsize_does_not_change_merges(self):
+        # Word-graph dedup is a memory/speed optimization; the merges it produces
+        # must be identical with the cache off (0) or on (small).
+        texts = ["the the the cat the cat sat the"]
+        uncached = BPETokenizer(cache_maxsize=0).train(texts, num_merges=10)
+        cached = BPETokenizer(cache_maxsize=10).train(texts, num_merges=10)
+        assert uncached == cached
+
     def test_super_bpe_phase1_matches_bpe(self):
         texts = ["the teacher teaches the thick thing"] * 3
         bpe = BPETokenizer()
