@@ -39,7 +39,7 @@ class Trainer:
             if not counts:
                 break
 
-            nodes = max(counts, key=lambda k: (len(k) - 1) * counts[k])
+            nodes = max(counts.items(), key=lambda kv: (len(kv[0]) - 1) * kv[1])[0]
 
             if verbose:
                 print("Merging", nodes, "count=", counts[nodes])
