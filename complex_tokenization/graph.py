@@ -105,7 +105,7 @@ class NodesSequence(GraphVertex):
         # returns self for unchanged subtrees, so the same objects recur across
         # merges and a full re-walk becomes a cache hit. Valid while GraphSettings
         # is fixed, which holds for a node's lifetime during training.
-        cached = getattr(self, "_merges", None)
+        cached = self._merges
         if cached is None:
             cached = tuple(self._iter_merges())
             object.__setattr__(self, "_merges", cached)
@@ -137,7 +137,7 @@ class NodesSequence(GraphVertex):
 
         # _merges (when memoized) lists every mergeable subsequence in this
         # subtree, so if the merge isn't among them nothing here changes.
-        cached = getattr(self, "_merges", None)
+        cached = self._merges
         if cached is not None and merge not in cached:
             return self
 
