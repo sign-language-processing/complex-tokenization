@@ -13,7 +13,7 @@ With language-specific decomposition:
 """
 
 from collections.abc import Callable
-from functools import reduce
+from functools import lru_cache, reduce
 
 from tokenizers.pre_tokenizers import PreTokenizer
 
@@ -37,6 +37,7 @@ class Tokenizer:
         merge_size: int = 2,
         connected: bool = False,
         pretokenizer: PreTokenizer = GPTPretokenizer,
+        cache_maxsize: int | None = None,
     ):
         if isinstance(units, str):
             if units not in UNIT_FUNCTIONS:
@@ -47,6 +48,7 @@ class Tokenizer:
         self.merge_size = merge_size
         self.connected = connected
         self.pretokenizer = pretokenizer
+        self.cache_maxsize = cache_maxsize
         self.merges: list[tuple[str, ...]] = []
 
     @staticmethod
@@ -57,8 +59,17 @@ class Tokenizer:
         self.merges.extend(merges)
 
     def _build_graphs(self, texts: list[str]) -> tuple[GraphVertex, ...]:
+        # Deduplicate identical word graphs within this build: repeated words
+        # share one immutable subgraph (and its get_merges memo) instead of N
+        # copies. The cache is local to the build, so it's freed before training
+        # (no pinning of pre-merge graphs) and can't leak a settings-dependent
+        # graph to a later run. cache_maxsize=None is unbounded; 0 disables.
+        if self.cache_maxsize == 0:
+            units = self.units
+        else:
+            units = lru_cache(maxsize=self.cache_maxsize)(self.units)
         return tuple(
-            words(text, connected=self.connected, units=self.units,
+            words(text, connected=self.connected, units=units,
                   pretokenizer=self.pretokenizer)
             for text in texts
         )
@@ -98,29 +109,29 @@ class Tokenizer:
 
 
 class BPETokenizer(Tokenizer):
-    def __init__(self, units="utf8_clusters", pretokenizer=GPTPretokenizer):
-        super().__init__(units=units, merge_size=2, connected=False, pretokenizer=pretokenizer)
+    def __init__(self, **kwargs):
+        super().__init__(merge_size=2, connected=False, **kwargs)
 
 
 class BNETokenizer(Tokenizer):
-    def __init__(self, n=4, units="utf8_clusters", pretokenizer=GPTPretokenizer):
-        super().__init__(units=units, merge_size=n, connected=False, pretokenizer=pretokenizer)
+    def __init__(self, n=4, **kwargs):
+        super().__init__(merge_size=n, connected=False, **kwargs)
 
 
 class BoundlessBPETokenizer(Tokenizer):
-    def __init__(self, units="utf8_clusters", pretokenizer=GPTPretokenizer):
-        super().__init__(units=units, merge_size=2, connected=True, pretokenizer=pretokenizer)
+    def __init__(self, **kwargs):
+        super().__init__(merge_size=2, connected=True, **kwargs)
 
 
 class SuperBPETokenizer(Tokenizer):
-    def __init__(self, units="utf8_clusters", disconnected_merges: int | None = None, pretokenizer=GPTPretokenizer):
-        super().__init__(units=units, merge_size=2, connected=False, pretokenizer=pretokenizer)
+    def __init__(self, disconnected_merges: int | None = None, **kwargs):
+        super().__init__(merge_size=2, connected=False, **kwargs)
         self._disconnected_merges = disconnected_merges
 
     def train(self, texts: list[str], num_merges: int = 100, progress: bool = False) -> list[tuple[str, ...]]:
         disconnected_merges = self._disconnected_merges or num_merges // 2
 
-        phase1 = BPETokenizer(units=self.units, pretokenizer=self.pretokenizer)
+        phase1 = BPETokenizer(units=self.units, pretokenizer=self.pretokenizer, cache_maxsize=self.cache_maxsize)
         phase1.train(texts, num_merges=disconnected_merges, progress=progress)
 
         self.connected = True
