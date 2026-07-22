@@ -100,7 +100,7 @@ class Tokenizer:
         GraphSettings.ONLY_MINIMAL_MERGES = True
         GraphSettings.MAX_MERGE_SIZE = self.merge_size
 
-        trainer.train(num_merges=num_merges, progress=progress)
+        trainer.train(num_merges=num_merges, progress=progress, incremental=not self.connected)
         self.merges = trainer.get_merges()
         return trainer, self.merges
 
