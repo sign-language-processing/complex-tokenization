@@ -1,5 +1,6 @@
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
+from functools import wraps
 from itertools import chain
 
 from complex_tokenization.graphs.settings import GraphSettings
@@ -11,6 +12,25 @@ def dot_escape(s: str) -> str:
         .replace("\\", "\\\\") \
         .replace('"', '\\"') \
         .replace("\n", "\\n")
+
+
+def merge_shared(merge_fn):
+    """Merge each distinct subgraph object once per top-level merge call.
+
+    Duplicated subgraphs are shared objects (the build cache). The memo, shared
+    down the recursion, maps id(subgraph) -> merged result, so duplicates are
+    merged once and keep sharing one object (and one get_merges memo) at any
+    nesting depth, instead of diverging into equal-but-distinct copies.
+    """
+    @wraps(merge_fn)
+    def merge(self, token, nodes, memo=None):
+        if memo is None:
+            memo = {}
+        result = memo.get(id(self))
+        if result is None:
+            result = memo[id(self)] = merge_fn(self, token, nodes, memo)
+        return result
+    return merge
 
 
 
@@ -40,7 +60,7 @@ class GraphVertex:
     def get_merges(self) -> list[str] | Iterator[tuple[str, ...]]:
         return []
 
-    def merge(self, token, merge) -> "GraphVertex":
+    def merge(self, token, merge, memo=None) -> "GraphVertex":
         raise NotImplementedError
 
     def node_count(self) -> int:
@@ -62,7 +82,7 @@ class Node(bytes, GraphVertex):
     def dot(self, level=0) -> Iterable[str]:
         yield "\t" * level + f'{self.oid} [label="{dot_escape(str(self))}"];'
 
-    def merge(self, token: "Node", merge: tuple):
+    def merge(self, token: "Node", merge: tuple, memo=None):
         return self
 
     def node_count(self) -> int:
@@ -124,7 +144,8 @@ class NodesSequence(GraphVertex):
     def node_count(self) -> int:
         return sum(n.node_count() for n in self.nodes)
 
-    def merge(self, token: Node, merge: tuple["GraphVertex", ...]):
+    @merge_shared
+    def merge(self, token: Node, merge: tuple["GraphVertex", ...], memo: dict):
         nodes = self.nodes
 
         # _merges (when memoized) lists every mergeable subsequence in this
@@ -151,7 +172,7 @@ class NodesSequence(GraphVertex):
 
         if len(out) == 1:
             return out[0]
-        merged_nodes = tuple(node.merge(token, merge) for node in out)
+        merged_nodes = tuple(node.merge(token, merge, memo) for node in out)
         if merged_nodes == nodes:
             return self
         return NodesSequence(merged_nodes)
@@ -221,14 +242,15 @@ class Tree(GraphVertex):
     def node_count(self) -> int:
         return self.root.node_count() + sum(c.node_count() for c in self.children)
 
-    def merge(self, token: Node, nodes: tuple):
+    @merge_shared
+    def merge(self, token: Node, nodes: tuple, memo: dict):
         if nodes[0] == self.root:
             if len(nodes) == len(self.children) + 1:
                 if all(nodes[i + 1] == child for i, child in enumerate(self.children)):
                     return token
 
-        root = self.root.merge(token, nodes)
-        children = tuple(child.merge(token, nodes) for child in self.children)
+        root = self.root.merge(token, nodes, memo)
+        children = tuple(child.merge(token, nodes, memo) for child in self.children)
         if root == self.root and children == self.children:
             return self
         return Tree(root=root, children=children)
@@ -267,7 +289,8 @@ class FullyConnectedGraph(GraphVertex):
     def node_count(self) -> int:
         return sum(n.node_count() for n in self.nodes)
 
-    def merge(self, token: Node, merge: tuple):
+    @merge_shared
+    def merge(self, token: Node, merge: tuple, memo: dict):
         remaining = list(self.nodes)
         if len(merge) == 2:
             m0, m1 = merge
@@ -281,7 +304,7 @@ class FullyConnectedGraph(GraphVertex):
                                 return merged[0]
                             return FullyConnectedGraph(nodes=tuple(merged))
 
-        merged_nodes = tuple(n.merge(token, merge) for n in self.nodes)
+        merged_nodes = tuple(n.merge(token, merge, memo) for n in self.nodes)
         if merged_nodes == self.nodes:
             return self
         return FullyConnectedGraph(nodes=merged_nodes)
@@ -326,9 +349,10 @@ class UnconnectedGraphs(GraphVertex):
     def node_count(self) -> int:
         return sum(sg.node_count() for sg in self.subgraphs)
 
-    def merge(self, token: Node, merge: tuple):
+    @merge_shared
+    def merge(self, token: Node, merge: tuple, memo: dict):
         old = self.subgraphs
-        new = tuple(sg.merge(token, merge) for sg in old)
+        new = tuple(sg.merge(token, merge, memo) for sg in old)
         if new == old:
             return self
         return UnconnectedGraphs(subgraphs=new)
