@@ -12,15 +12,15 @@ def _merge_score(item):
     return (len(nodes) - 1) * count
 
 
-def _index_add(total, index, i, counts):
+def _index_add(total, index, i, counts, weight):
     for merge, count in counts.items():
-        total[merge] += count
+        total[merge] += count * weight
         index[merge].add(i)
 
 
-def _index_remove(total, index, i, counts):
+def _index_remove(total, index, i, counts, weight):
     for merge, count in counts.items():
-        total[merge] -= count
+        total[merge] -= count * weight
         if total[merge] == 0:
             del total[merge]
         others = index[merge]
@@ -77,16 +77,21 @@ class Trainer:
 
     def _train_incremental(self, num_merges: int, progress: bool = False):
         # Rebuilding Counter(graph.get_merges()) every step recounts the whole
-        # forest. Instead, keep each subgraph's candidate counts plus a running
-        # global total, and after a merge update only the subgraphs that
-        # contained it (found via `index`). total is summed in subgraph order, so
-        # picking the first max-score candidate matches max(Counter(...)) exactly.
-        components = list(self.graph.subgraphs)
+        # forest. Instead, train on the unique subgraphs, weighted by how often
+        # each occurs: keep each unique subgraph's candidate counts plus a
+        # running global total, and after a merge update only the subgraphs
+        # that contained it (found via `index`). Uniques are kept in
+        # first-occurrence order and totals summed in that order, so picking
+        # the first max-score candidate matches max(Counter(...)) exactly.
+        positions = {sg: i for i, sg in enumerate(dict.fromkeys(self.graph.subgraphs))}
+        occurrences = [positions[sg] for sg in self.graph.subgraphs]
+        components = list(positions)
+        weights = Counter(occurrences)
         comp_counts = [Counter(c.get_merges()) for c in components]
         total: dict[tuple, int] = defaultdict(int)
         index: dict[tuple, set[int]] = defaultdict(set)
         for i, counts in enumerate(comp_counts):
-            _index_add(total, index, i, counts)
+            _index_add(total, index, i, counts, weights[i])
 
         for _ in self._steps(num_merges, progress):
             if not total:
@@ -96,14 +101,14 @@ class Trainer:
             token = reduce(lambda x, y: x + y, nodes)
 
             for i in list(index[nodes]):
-                _index_remove(total, index, i, comp_counts[i])
+                _index_remove(total, index, i, comp_counts[i], weights[i])
                 components[i] = components[i].merge(token, nodes)
                 comp_counts[i] = Counter(components[i].get_merges())
-                _index_add(total, index, i, comp_counts[i])
+                _index_add(total, index, i, comp_counts[i], weights[i])
 
             self.merges.append((token, nodes))
 
-        self.graph = UnconnectedGraphs(tuple(components))
+        self.graph = UnconnectedGraphs(tuple(components[i] for i in occurrences))
 
     def get_merges(self):
         return [tuple(str(node) for node in nodes) for _, nodes in self.merges]
