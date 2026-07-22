@@ -123,25 +123,34 @@ fn train_unconn(
     num_merges: usize,
     verbose: bool,
 ) -> Vec<(GraphV, Vec<GraphV>)> {
-    let mut active: Vec<bool> = subs
-        .iter()
-        .map(|sg| !matches!(sg, GraphV::Node(_)))
-        .collect();
-    let mut pending = Vec::new();
-    let mut counts: FxHashMap<Vec<GraphV>, usize> = FxHashMap::default();
-
-    for _ in range_start..num_merges {
-        count_merges_into(subs, &active, &mut counts);
-        let Some((nodes, count)) = pick_best(&counts) else {
-            break;
-        };
-        let token = make_token(&nodes);
-        if verbose {
-            println!("Merging {:?} count={}", nodes, count);
+    // Occurrence subgraphs repeat heavily; group identical ones into weighted
+    // entries so the delta+index loop touches each unique graph once per merge.
+    let mut group_of: FxHashMap<GraphV, usize> = FxHashMap::default();
+    let mut entries: Vec<WordEntry> = Vec::new();
+    let mut members: Vec<Vec<usize>> = Vec::new();
+    for (i, sg) in subs.iter().enumerate() {
+        match group_of.get(sg) {
+            Some(&g) => {
+                entries[g].freq += 1;
+                members[g].push(i);
+            }
+            None => {
+                let g = entries.len();
+                group_of.insert(sg.clone(), g);
+                entries.push(WordEntry::new(sg.clone(), 1));
+                members.push(vec![i]);
+            }
         }
-        apply_merge_parallel(subs, &mut active, &token, &nodes);
-        apply_merge_to_cluster_cache(&token, &nodes);
-        pending.push((token, nodes));
+    }
+
+    let pending = train_entries_delta(&mut entries, range_start, num_merges, verbose, true, &mut |token, nodes| {
+        apply_merge_to_cluster_cache(token, nodes);
+    });
+
+    for (entry, member_idxs) in entries.iter().zip(&members) {
+        for &i in member_idxs {
+            subs[i] = entry.graph.clone();
+        }
     }
     pending
 }
@@ -186,10 +195,28 @@ impl WordEntry {
         WordEntry { graph, candidates, freq }
     }
 
-    fn apply_merge(&mut self, token: &GraphV, merge: &[GraphV]) {
-        self.graph = self.graph.merge(token, merge);
+    fn recount(&mut self) {
         self.candidates.clear();
         self.graph.emit_merges(&mut |m| *self.candidates.entry(m).or_insert(0) += 1);
+    }
+
+    fn apply_merge(&mut self, token: &GraphV, merge: &[GraphV]) {
+        self.graph = self.graph.merge(token, merge);
+        self.recount();
+    }
+
+    // try_merge variant: matches the legacy Unconn path (apply_merge_parallel),
+    // where seq_try_merge no-ops minimal merges of length > 2. Returns whether
+    // the graph changed; candidates are only rebuilt on change.
+    fn apply_merge_try(&mut self, token: &GraphV, merge: &[GraphV]) -> bool {
+        match self.graph.try_merge(token, merge) {
+            Some(g) => {
+                self.graph = g;
+                self.recount();
+                true
+            }
+            None => false,
+        }
     }
 }
 
@@ -254,15 +281,35 @@ fn build_global_counts(entries: &[WordEntry]) -> FxHashMap<Vec<GraphV>, usize> {
     global
 }
 
-// Disconnected: use word-level candidate caching (no graph assembly)
-fn train_streaming_disconnected(
+// Inverted index: candidate -> entry indices that currently contain it.
+// Each entry appears at most once per candidate (candidate keys are unique per entry).
+fn build_candidate_index(entries: &[WordEntry]) -> FxHashMap<Vec<GraphV>, Vec<u32>> {
+    let mut index: FxHashMap<Vec<GraphV>, Vec<u32>> = FxHashMap::default();
+    for (i, entry) in entries.iter().enumerate() {
+        for cand in entry.candidates.keys() {
+            index.entry(cand.clone()).or_default().push(i as u32);
+        }
+    }
+    index
+}
+
+// Persistent global counts + inverted index with delta updates. Per merge step
+// only the entries containing the chosen candidate are touched, and `global` is
+// patched by diffing each entry's old vs new candidates instead of being rebuilt.
+// `on_merge` fires once per merge in order (used for cluster-cache side effects).
+// `use_try` selects try_merge semantics (legacy Unconn path) over merge; with
+// try_merge a no-op leaves the entry and counts untouched.
+fn train_entries_delta(
     entries: &mut Vec<WordEntry>,
     range_start: usize,
     num_merges: usize,
     verbose: bool,
+    use_try: bool,
+    on_merge: &mut dyn FnMut(&GraphV, &[GraphV]),
 ) -> Vec<(GraphV, Vec<GraphV>)> {
     let mut pending = Vec::new();
     let mut global = build_global_counts(entries);
+    let mut index = build_candidate_index(entries);
 
     for _ in range_start..num_merges {
         let Some((nodes, count)) = pick_best(&global) else {
@@ -273,19 +320,66 @@ fn train_streaming_disconnected(
             println!("Merging {:?} count={}", nodes, count);
         }
 
-        // Update only affected entries (parallel)
-        entries.par_iter_mut().for_each(|entry| {
-            if entry.candidates.contains_key(&nodes) {
+        let affected: Vec<u32> = index.get(&nodes).cloned().unwrap_or_default();
+
+        for &idx in &affected {
+            let entry = &mut entries[idx as usize];
+            let freq = entry.freq;
+            let old = std::mem::take(&mut entry.candidates);
+            let changed = if use_try {
+                entry.apply_merge_try(&token, &nodes)
+            } else {
                 entry.apply_merge(&token, &nodes);
+                true
+            };
+            if !changed {
+                entry.candidates = old;
+                continue;
             }
-        });
+            let new = &entry.candidates;
 
-        // Rebuild global counts (parallel)
-        global = build_global_counts(entries);
+            for (cand, &old_c) in &old {
+                let new_c = new.get(cand).copied().unwrap_or(0);
+                if new_c < old_c {
+                    let g = global.get_mut(cand).unwrap();
+                    *g -= (old_c - new_c) * freq;
+                    if *g == 0 {
+                        global.remove(cand);
+                    }
+                    if new_c == 0 {
+                        if let Some(v) = index.get_mut(cand) {
+                            if let Some(pos) = v.iter().position(|&x| x == idx) {
+                                v.swap_remove(pos);
+                            }
+                        }
+                    }
+                }
+            }
+            for (cand, &new_c) in new {
+                let old_c = old.get(cand).copied().unwrap_or(0);
+                if new_c > old_c {
+                    *global.entry(cand.clone()).or_insert(0) += (new_c - old_c) * freq;
+                    if old_c == 0 {
+                        index.entry(cand.clone()).or_default().push(idx);
+                    }
+                }
+            }
+        }
 
+        on_merge(&token, &nodes);
         pending.push((token, nodes));
     }
     pending
+}
+
+// Disconnected streaming: word-level candidate caching via the delta+index loop.
+fn train_streaming_disconnected(
+    entries: &mut Vec<WordEntry>,
+    range_start: usize,
+    num_merges: usize,
+    verbose: bool,
+) -> Vec<(GraphV, Vec<GraphV>)> {
+    train_entries_delta(entries, range_start, num_merges, verbose, false, &mut |_, _| {})
 }
 
 // Connected: must assemble doc graphs for cross-word pairs
