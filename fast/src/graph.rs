@@ -1,8 +1,21 @@
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
+use rustc_hash::FxHashMap;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+
+/// Per-top-level-merge memo: Arc pointer of a subtree -> its merged result.
+/// Shared subtrees (duplicate word graphs in a connected Seq) are merged once
+/// and keep sharing one Arc, so pointer-based dedup survives across merge steps.
+pub type MergeMemo = FxHashMap<usize, Option<GraphV>>;
+
+fn arc_ptr(g: &GraphV) -> Option<usize> {
+    match g {
+        GraphV::Seq(a) | GraphV::FullConn(a) | GraphV::Unconn(a) => Some(Arc::as_ptr(a) as usize),
+        _ => None,
+    }
+}
 
 use crate::settings::{MAX_MERGE_SIZE, ONLY_MINIMAL_MERGES};
 use std::sync::atomic::Ordering;
@@ -160,10 +173,23 @@ impl GraphV {
 
     /// Like merge but returns None when nothing changed — avoids allocations.
     pub fn try_merge(&self, token: &GraphV, merge: &[GraphV]) -> Option<GraphV> {
-        match self {
+        let mut memo = MergeMemo::default();
+        self.try_merge_m(token, merge, &mut memo)
+    }
+
+    /// Memoized variant: subtrees are keyed by Arc pointer so a shared subtree
+    /// is merged once per top-level call and its result stays pointer-shared.
+    pub fn try_merge_m(&self, token: &GraphV, merge: &[GraphV], memo: &mut MergeMemo) -> Option<GraphV> {
+        let key = arc_ptr(self);
+        if let Some(k) = key {
+            if let Some(v) = memo.get(&k) {
+                return v.clone();
+            }
+        }
+        let result = match self {
             GraphV::Node(_) => None,
-            GraphV::Seq(nodes) => seq_try_merge(nodes, token, merge),
-            GraphV::Tree { root, children } => tree_try_merge(root, children, token, merge),
+            GraphV::Seq(nodes) => seq_try_merge(nodes, token, merge, memo),
+            GraphV::Tree { root, children } => tree_try_merge(root, children, token, merge, memo),
             GraphV::FullConn(nodes) => {
                 let result = fullconn_merge(nodes, token, merge);
                 if result == *self { None } else { Some(result) }
@@ -172,7 +198,11 @@ impl GraphV {
                 let result = self.merge(token, merge);
                 if result == *self { None } else { Some(result) }
             }
+        };
+        if let Some(k) = key {
+            memo.insert(k, result.clone());
         }
+        result
     }
 
     /// Check if any leaf Node in this graph has the given byte value.
@@ -258,6 +288,58 @@ fn seq_emit_merges(nodes: &[GraphV], emit: &mut dyn FnMut(Vec<GraphV>)) {
                 emit(vec![nodes[i].clone(), nodes[j - 1].clone()]);
             } else {
                 emit(nodes[i..j].to_vec());
+            }
+        }
+    }
+}
+
+/// Weighted recount for a top-level Seq. Within-child candidates are counted
+/// once per unique Arc pointer and multiplied by the number of occurrences of
+/// that pointer; the positional cross-boundary candidates are emitted per
+/// position exactly as `seq_emit_merges` does. Count-identical to walking
+/// `emit_merges` (counts are summed, order-independent), but O(unique children)
+/// instead of O(occurrences) when duplicate children are pointer-shared.
+pub fn seq_recount(nodes: &[GraphV], out: &mut FxHashMap<Vec<GraphV>, usize>) {
+    let only_minimal = ONLY_MINIMAL_MERGES.load(Ordering::Relaxed);
+    let max_size = MAX_MERGE_SIZE.load(Ordering::Relaxed);
+    let num_nodes = nodes.len();
+
+    let mut ptr_count: FxHashMap<usize, usize> = FxHashMap::default();
+    for n in nodes {
+        if let Some(p) = arc_ptr(n) {
+            *ptr_count.entry(p).or_insert(0) += 1;
+        }
+    }
+
+    let mut done: FxHashMap<usize, ()> = FxHashMap::default();
+    for n in nodes {
+        match n {
+            GraphV::Node(_) => {}
+            _ => match arc_ptr(n) {
+                Some(p) => {
+                    if done.insert(p, ()).is_none() {
+                        let w = ptr_count[&p];
+                        n.emit_merges(&mut |m| *out.entry(m).or_insert(0) += w);
+                    }
+                }
+                None => n.emit_merges(&mut |m| *out.entry(m).or_insert(0) += 1),
+            },
+        }
+    }
+
+    for i in 0..num_nodes {
+        if only_minimal && !nodes[i].is_node() {
+            continue;
+        }
+        let end = std::cmp::min(i + max_size + 1, num_nodes + 1);
+        for j in (i + 2)..end {
+            if only_minimal && !nodes[j - 1].is_node() {
+                break;
+            }
+            if j - i == 2 {
+                *out.entry(vec![nodes[i].clone(), nodes[j - 1].clone()]).or_insert(0) += 1;
+            } else {
+                *out.entry(nodes[i..j].to_vec()).or_insert(0) += 1;
             }
         }
     }
@@ -859,14 +941,14 @@ fn py_tuple_to_merge(tuple: &Bound<'_, PyTuple>) -> PyResult<Vec<GraphV>> {
     Ok(merge)
 }
 
-fn seq_try_merge(nodes: &[GraphV], token: &GraphV, merge: &[GraphV]) -> Option<GraphV> {
+fn seq_try_merge(nodes: &[GraphV], token: &GraphV, merge: &[GraphV], memo: &mut MergeMemo) -> Option<GraphV> {
     let m = merge.len();
     let n = nodes.len();
 
     let only_minimal = ONLY_MINIMAL_MERGES.load(Ordering::Relaxed);
 
     if only_minimal && m == 2 && n >= 2 {
-        return seq_try_merge_minimal_2(nodes, token, &merge[0], &merge[1]);
+        return seq_try_merge_minimal_2(nodes, token, &merge[0], &merge[1], memo);
     }
 
     let has_complex_child = nodes.iter().any(|n| !matches!(n, GraphV::Node(_)));
@@ -909,7 +991,7 @@ fn seq_try_merge(nodes: &[GraphV], token: &GraphV, merge: &[GraphV]) -> Option<G
     if out.len() == 1 {
         let single = out.into_iter().next().unwrap();
         if has_match { return Some(single); }
-        return single.try_merge(token, merge);
+        return single.try_merge_m(token, merge, memo);
     }
 
     let mut child_changed = false;
@@ -918,7 +1000,7 @@ fn seq_try_merge(nodes: &[GraphV], token: &GraphV, merge: &[GraphV]) -> Option<G
         if matches!(node, GraphV::Node(_)) {
             new_out.push(node.clone());
         } else {
-            match node.try_merge(token, merge) {
+            match node.try_merge_m(token, merge, memo) {
                 Some(new_n) => { child_changed = true; new_out.push(new_n); }
                 None => new_out.push(node.clone()),
             }
@@ -928,7 +1010,7 @@ fn seq_try_merge(nodes: &[GraphV], token: &GraphV, merge: &[GraphV]) -> Option<G
     Some(GraphV::new_seq(new_out))
 }
 
-fn seq_try_merge_minimal_2(nodes: &[GraphV], token: &GraphV, m0: &GraphV, m1: &GraphV) -> Option<GraphV> {
+fn seq_try_merge_minimal_2(nodes: &[GraphV], token: &GraphV, m0: &GraphV, m1: &GraphV, memo: &mut MergeMemo) -> Option<GraphV> {
     let n = nodes.len();
     if n < 2 { return None; }
 
@@ -977,7 +1059,7 @@ fn seq_try_merge_minimal_2(nodes: &[GraphV], token: &GraphV, m0: &GraphV, m1: &G
         let merge = [m0.clone(), m1.clone()];
         let new_out: Vec<GraphV> = out.into_iter().map(|node| {
             if matches!(&node, GraphV::Node(_)) { return node; }
-            match node.try_merge(token, &merge) {
+            match node.try_merge_m(token, &merge, memo) {
                 Some(new_n) => new_n,
                 None => node,
             }
@@ -989,7 +1071,7 @@ fn seq_try_merge_minimal_2(nodes: &[GraphV], token: &GraphV, m0: &GraphV, m1: &G
     let mut child_changed = false;
     let new_nodes: Vec<GraphV> = nodes.iter().map(|node| {
         if matches!(node, GraphV::Node(_)) { return node.clone(); }
-        match node.try_merge(token, &merge) {
+        match node.try_merge_m(token, &merge, memo) {
             Some(new_n) => { child_changed = true; new_n }
             None => node.clone(),
         }
@@ -998,7 +1080,7 @@ fn seq_try_merge_minimal_2(nodes: &[GraphV], token: &GraphV, m0: &GraphV, m1: &G
     Some(GraphV::new_seq(new_nodes))
 }
 
-fn tree_try_merge(root: &GraphV, children: &[GraphV], token: &GraphV, merge: &[GraphV]) -> Option<GraphV> {
+fn tree_try_merge(root: &GraphV, children: &[GraphV], token: &GraphV, merge: &[GraphV], memo: &mut MergeMemo) -> Option<GraphV> {
     // Check if full tree merge (root + all children match)
     if merge.len() == children.len() + 1 && merge[0] == *root {
         if merge[1..].iter().zip(children.iter()).all(|(a, b)| a == b) {
@@ -1006,9 +1088,9 @@ fn tree_try_merge(root: &GraphV, children: &[GraphV], token: &GraphV, merge: &[G
         }
     }
 
-    let new_root = root.try_merge(token, merge);
+    let new_root = root.try_merge_m(token, merge, memo);
     let new_children: Vec<Option<GraphV>> = children.iter()
-        .map(|c| c.try_merge(token, merge))
+        .map(|c| c.try_merge_m(token, merge, memo))
         .collect();
 
     let any_changed = new_root.is_some() || new_children.iter().any(|c| c.is_some());
