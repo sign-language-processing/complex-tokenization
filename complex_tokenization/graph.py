@@ -328,7 +328,13 @@ class UnconnectedGraphs(GraphVertex):
 
     def merge(self, token: Node, merge: tuple):
         old = self.subgraphs
-        new = tuple(sg.merge(token, merge) for sg in old)
+        # Duplicated words share one subgraph object (the build cache), so
+        # merge each object once instead of once per occurrence. This also
+        # keeps duplicates sharing one object (and one get_merges memo) after
+        # they change, instead of diverging into equal-but-distinct copies.
+        unique = {id(sg): sg for sg in old}
+        merged = {i: sg.merge(token, merge) for i, sg in unique.items()}
+        new = tuple(merged[id(sg)] for sg in old)
         if new == old:
             return self
         return UnconnectedGraphs(subgraphs=new)
