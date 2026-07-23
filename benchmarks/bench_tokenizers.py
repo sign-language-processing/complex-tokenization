@@ -15,6 +15,7 @@ import hashlib
 import resource
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -41,9 +42,8 @@ def train(case, impl, texts, num_merges):
     return tokenizer.train(texts, num_merges=num_merges)
 
 
-def run_case(case, impl, samples, num_merges):
-    from tests.utils import text_dataset
-    texts = [t for t in text_dataset(max_samples=samples or None) if t.strip()]
+def run_case(case, impl, texts_file, num_merges):
+    texts = Path(texts_file).read_text().split("\x00")
 
     start = time.perf_counter()
     merges = train(case, impl, texts, num_merges)
@@ -57,15 +57,16 @@ def run_case(case, impl, samples, num_merges):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--samples", type=int, default=3500,
-                        help="dataset rows; default keeps every Python case under ~10s; 0 = full split (~2M words)")
+    parser.add_argument("--samples", type=int, default=2000,
+                        help="dataset rows; the default keeps the whole run around 30s; 0 = full split (~2M words)")
     parser.add_argument("--merges", type=int, default=100)
     parser.add_argument("--case", choices=CASES, help=argparse.SUPPRESS)  # subprocess mode
     parser.add_argument("--impl", choices=IMPLS, help=argparse.SUPPRESS)
+    parser.add_argument("--texts-file", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     if args.case:
-        run_case(args.case, args.impl, args.samples, args.merges)
+        run_case(args.case, args.impl, args.texts_file, args.merges)
         sys.exit(0)
 
     try:
@@ -74,21 +75,30 @@ if __name__ == "__main__":
     except ImportError:
         impls = IMPLS[:-1]
 
-    rows = []
-    for impl in impls:
-        for case in CASES if impl != "HuggingFace" else ["BPE"]:
-            result = subprocess.run(
-                [sys.executable, __file__, "--case", case, "--impl", impl,
-                 "--samples", str(args.samples), "--merges", str(args.merges)],
-                capture_output=True, text=True, cwd=Path(__file__).parent.parent,
-            )
-            row = [line for line in result.stdout.splitlines() if line.startswith("|")]
-            rows.extend(row or [f"| {case} | {impl} | failed | | | see stderr |"])
-            if not row:
-                print(result.stderr, file=sys.stderr)
-
+    # Load the corpus once and hand it to subprocesses through a file:
+    # importing datasets and streaming rows costs seconds per subprocess.
     from tests.utils import text_dataset
     texts = [t for t in text_dataset(max_samples=args.samples or None) if t.strip()]
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
+        f.write("\x00".join(texts))
+        texts_file = f.name
+
+    rows = []
+    try:
+        for impl in impls:
+            for case in CASES if impl != "HuggingFace" else ["BPE"]:
+                result = subprocess.run(
+                    [sys.executable, __file__, "--case", case, "--impl", impl,
+                     "--texts-file", texts_file, "--merges", str(args.merges)],
+                    capture_output=True, text=True, cwd=Path(__file__).parent.parent,
+                )
+                row = [line for line in result.stdout.splitlines() if line.startswith("|")]
+                rows.extend(row or [f"| {case} | {impl} | failed | | | see stderr |"])
+                if not row:
+                    print(result.stderr, file=sys.stderr)
+    finally:
+        Path(texts_file).unlink()
+
     print(f"Corpus: {len(texts):,} documents, {sum(len(t) for t in texts):,} characters"
           f" | {args.merges} merges\n")
     print("| Tokenizer | Implementation | Time | Peak RSS | Merges | Digest |")
