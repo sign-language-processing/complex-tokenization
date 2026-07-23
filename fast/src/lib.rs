@@ -1,4 +1,6 @@
 mod graph;
+mod ingest;
+mod pretok;
 mod settings;
 mod trainer;
 mod units;
@@ -22,6 +24,9 @@ fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(units::set_ids_reverse_dict_py, m)?)?;
     m.add_function(wrap_pyfunction!(units::warm_word_cache_py, m)?)?;
     m.add_function(wrap_pyfunction!(units::clear_word_cache, m)?)?;
+    m.add_function(wrap_pyfunction!(ingest::trainer_from_texts, m)?)?;
+    m.add_function(wrap_pyfunction!(ingest::has_cluster_handlers_py, m)?)?;
+    m.add_function(wrap_pyfunction!(ingest::pretokenize_count, m)?)?;
     m.add_function(wrap_pyfunction!(sync_settings, m)?)?;
     Ok(())
 }

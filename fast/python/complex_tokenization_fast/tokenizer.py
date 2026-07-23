@@ -1,6 +1,6 @@
 from functools import reduce
 
-from complex_tokenization_fast._rs import Node, Trainer
+from complex_tokenization_fast._rs import Node, Trainer, has_cluster_handlers_py, trainer_from_texts
 from complex_tokenization_fast.graphs.settings import GraphSettings
 from complex_tokenization_fast.graphs.units import characters, register_script, utf8, utf8_clusters
 from complex_tokenization_fast.graphs.words import GPTPretokenizer, words
@@ -42,8 +42,19 @@ class Tokenizer:
         GraphSettings.ONLY_MINIMAL_MERGES = True
         GraphSettings.MAX_MERGE_SIZE = self.merge_size
 
-        graphs = self._build_graphs(texts)
-        trainer = Trainer(graphs=graphs)
+        # Default configuration ingests entirely in Rust (one boundary
+        # crossing; gigatoken's O200k pretokenizer is byte-identical to
+        # GPTPretokenizer). Custom pretokenizers/units/script handlers take
+        # the per-document Python path.
+        if (
+            self.units is utf8_clusters
+            and self.pretokenizer is GPTPretokenizer
+            and not has_cluster_handlers_py()
+        ):
+            trainer = trainer_from_texts(list(texts), connected=self.connected)
+        else:
+            graphs = self._build_graphs(texts)
+            trainer = Trainer(graphs=graphs)
 
         for merge_strs in self.merges:
             nodes = tuple(Node(value=s.encode("utf-8")) for s in merge_strs)

@@ -1200,6 +1200,18 @@ pub struct Trainer {
     premerge_registry: Option<FxHashMap<usize, GraphV>>,
 }
 
+impl Trainer {
+    pub(crate) fn from_graph(graph: GraphV) -> Self {
+        Trainer {
+            graph,
+            merges: Vec::new(),
+            doc_words: None,
+            streaming_connected: false,
+            premerge_registry: None,
+        }
+    }
+}
+
 #[pymethods]
 impl Trainer {
     #[new]
