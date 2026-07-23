@@ -108,3 +108,27 @@ class TestTokenizerAPI:
         first = tokenizer_cls().train(texts, num_merges=4)
         second = tokenizer_cls().train(texts, num_merges=4)
         assert first == second
+
+
+class TestMergeRoundTrip:
+    def test_merge_strings_reconstruct_exact_bytes(self):
+        from complex_tokenization.graph import bytes_to_str, str_to_bytes
+        for data in [b"\xe2\x80", b"the", "é".encode(), b"\\x41", b"\xff\\", " \xd7".encode("latin-1")]:
+            assert str_to_bytes(bytes_to_str(data)) == data
+
+    def test_replayed_merges_reproduce_trainer_state(self):
+        # Byte-level BPE learns merges that are not UTF-8 aligned (here the
+        # first two bytes of an en-dash). get_merges -> add_merges must
+        # reproduce the same graph state, not silently drop those merges.
+        from complex_tokenization.tokenizer import BPETokenizer
+        texts = ["a – b – c – d – e – f – g – h"] * 3
+        tok = BPETokenizer()
+        trainer = tok.make_trainer(texts)
+        tok.train_on_trainer(trainer, num_merges=6)
+        assert any("\\x" in s for merge in tok.get_merges() for s in merge), \
+            "corpus must produce a non-UTF8-aligned merge for this test"
+
+        tok2 = BPETokenizer()
+        tok2.add_merges(tok.get_merges())
+        trainer2 = tok2.make_trainer(texts)
+        assert trainer2.graph == trainer.graph

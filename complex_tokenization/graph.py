@@ -1,3 +1,4 @@
+import re
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from functools import wraps
@@ -5,6 +6,21 @@ from itertools import chain
 
 from complex_tokenization.graphs.settings import GraphSettings
 from complex_tokenization.languages.chinese.ideographic_description_sequences import get_character_for_ids
+
+
+def bytes_to_str(data: bytes) -> str:
+    """Lossless textual form of token bytes: valid UTF-8 reads as itself,
+    undecodable bytes become \\xNN escapes. Literal backslashes are doubled
+    first, so str_to_bytes can always invert exactly."""
+    return data.replace(b"\\", b"\\\\").decode("utf-8", errors="backslashreplace")
+
+
+def str_to_bytes(s: str) -> bytes:
+    return re.sub(
+        rb"\\\\|\\x([0-9a-fA-F]{2})",
+        lambda m: bytes([int(m[1], 16)]) if m[1] else b"\\",
+        s.encode("utf-8"),
+    )
 
 
 def dot_escape(s: str) -> str:
@@ -44,7 +60,7 @@ class GraphVertex:
         raise NotImplementedError
 
     def __str__(self):
-        self_str = bytes(self).decode("utf-8", errors="replace")
+        self_str = bytes_to_str(bytes(self))
         token_replacement = get_character_for_ids(self_str)
         if token_replacement is not None:
             return token_replacement
