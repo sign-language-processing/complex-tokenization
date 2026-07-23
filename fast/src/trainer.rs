@@ -1849,24 +1849,195 @@ impl Trainer {
             .iter()
             .map(|item| pyobject_to_graphv(&item))
             .collect::<PyResult<_>>()?;
+        self.apply_one_merge(token_g, merge_nodes);
+        Ok(())
+    }
+
+    /// Apply a whole pre-merge list in one call. For an Unconn corpus and
+    /// pair merges this replays at the word level once per merge and applies
+    /// doc-top-level matches via an exact event simulation, then rewrites
+    /// each doc once — byte-identical to per-merge application, without the
+    /// per-merge doc scans.
+    fn apply_merges(&mut self, py: Python<'_>, merges: &Bound<'_, PyAny>) -> PyResult<()> {
+        let mut converted: Vec<(GraphV, Vec<GraphV>)> = Vec::new();
+        for item in merges.try_iter()? {
+            let item = item?;
+            let token_g = pyobject_to_graphv(&item.get_item(0)?)?;
+            let nodes_obj = item.get_item(1)?;
+            let mut merge_nodes: Vec<GraphV> = Vec::new();
+            for n in nodes_obj.try_iter()? {
+                merge_nodes.push(pyobject_to_graphv(&n?)?);
+            }
+            converted.push((token_g, merge_nodes));
+        }
+        let batchable = matches!(&self.graph, GraphV::Unconn(_))
+            && converted
+                .iter()
+                .all(|(_, n)| n.len() == 2 && n.iter().all(|g| matches!(g, GraphV::Node(_))));
+        if !batchable {
+            for (t, n) in converted {
+                self.apply_one_merge(t, n);
+            }
+            return Ok(());
+        }
+        py.allow_threads(|| self.apply_merges_batch(&converted));
+        self.merges.extend(converted);
+        Ok(())
+    }
+}
+
+impl Trainer {
+    fn apply_one_merge(&mut self, token_g: GraphV, merge_nodes: Vec<GraphV>) {
         // Applying pre-merges to a corpus (e.g. SuperBPE phase-1 → phase-2)
         // walks every document. Canonicalize children once, then merge each
         // unique word once per call and rebuild docs by pointer lookup.
         if let GraphV::Unconn(subs_arc) = &mut self.graph {
             let subs = Arc::make_mut(subs_arc);
-            let registry = self
-                .premerge_registry
-                .get_or_insert_with(|| {
-                    WordRegistry::new(
-                        canonicalize_subs(subs),
-                        std::sync::Arc::new(CandInterner::new()),
-                    )
-                });
+            let registry = self.premerge_registry.get_or_insert_with(|| {
+                WordRegistry::new(
+                    canonicalize_subs(subs),
+                    std::sync::Arc::new(CandInterner::new()),
+                )
+            });
             apply_premerge(subs, registry, &token_g, &merge_nodes);
         } else {
             self.graph = self.graph.merge(&token_g, &merge_nodes);
         }
         self.merges.push((token_g, merge_nodes));
-        Ok(())
+    }
+
+    fn apply_merges_batch(&mut self, list: &[(GraphV, Vec<GraphV>)]) {
+        let GraphV::Unconn(subs_arc) = &mut self.graph else { unreachable!() };
+        let subs = Arc::make_mut(subs_arc);
+        let registry = self.premerge_registry.get_or_insert_with(|| {
+            WordRegistry::new(
+                canonicalize_subs(subs),
+                std::sync::Arc::new(CandInterner::new()),
+            )
+        });
+
+        // Word-level replay, tracking each pre-call pointer's final graph and
+        // the exact step (if any) at which its word collapsed to a Node.
+        let mut cur2orig: FxHashMap<usize, Vec<usize>> =
+            registry.words.keys().map(|&p| (p, vec![p])).collect();
+        let mut final_of: FxHashMap<usize, GraphV> = FxHashMap::default();
+        let mut collapse_step: FxHashMap<usize, usize> = FxHashMap::default();
+        for (k, (token, nodes)) in list.iter().enumerate() {
+            let changed = registry.apply_merge_step(token, nodes);
+            for (oldp, newg) in changed {
+                let origs = cur2orig.remove(&oldp).unwrap_or_default();
+                let is_node = matches!(newg, GraphV::Node(_));
+                if let Some(np) = crate::graph::arc_ptr(&newg) {
+                    cur2orig.entry(np).or_default().extend(origs.iter().copied());
+                }
+                for &o in &origs {
+                    final_of.insert(o, newg.clone());
+                    if is_node {
+                        collapse_step.entry(o).or_insert(k);
+                    }
+                }
+            }
+        }
+
+        // Byte pairs of the list, for doc-top match detection.
+        let pairs: Vec<(Vec<u8>, Vec<u8>)> = list
+            .iter()
+            .map(|(_, n)| (n[0].to_bytes(), n[1].to_bytes()))
+            .collect();
+        let mut merge_index: FxHashMap<(Vec<u8>, Vec<u8>), Vec<usize>> = FxHashMap::default();
+        for (k, pair) in pairs.iter().enumerate() {
+            merge_index.entry(pair.clone()).or_default().push(k);
+        }
+
+        // Per doc: simulate the doc-top matches sequential application would
+        // have performed. At step k a match needs both children to be Nodes
+        // (from the start, or collapsed at a step < k) with the pair's bytes;
+        // an event's token participates from the following step. Then rewrite
+        // the doc once: surviving children take their final word state,
+        // consumed spans become Nodes.
+        subs.par_iter_mut().for_each(|doc| {
+            let GraphV::Seq(children_arc) = doc else {
+                // Single-word docs have no doc-top level; replay directly.
+                for (token, nodes) in list {
+                    if let Some(new_doc) = doc.try_merge(token, nodes) {
+                        *doc = new_doc;
+                    }
+                }
+                return;
+            };
+            let children: &[GraphV] = children_arc;
+            // (bytes, first step at which this child is a Node, source child)
+            let mut items: Vec<(Vec<u8>, usize, Option<usize>)> = children
+                .iter()
+                .enumerate()
+                .map(|(j, c)| {
+                    let avail = if matches!(c, GraphV::Node(_)) {
+                        0
+                    } else {
+                        match crate::graph::arc_ptr(c).and_then(|p| collapse_step.get(&p)) {
+                            Some(&k) => k + 1,
+                            None => usize::MAX,
+                        }
+                    };
+                    (c.to_bytes(), avail, Some(j))
+                })
+                .collect();
+            let mut any_event = false;
+            loop {
+                let mut best: Option<usize> = None;
+                for w in items.windows(2) {
+                    if w[0].1 == usize::MAX || w[1].1 == usize::MAX {
+                        continue;
+                    }
+                    if let Some(ks) = merge_index.get(&(w[0].0.clone(), w[1].0.clone())) {
+                        let need = w[0].1.max(w[1].1);
+                        if let Some(&k) = ks.iter().find(|&&k| k >= need) {
+                            best = Some(best.map_or(k, |b: usize| b.min(k)));
+                        }
+                    }
+                }
+                let Some(k) = best else { break };
+                any_event = true;
+                let (ka, kb) = (&pairs[k].0, &pairs[k].1);
+                let mut out: Vec<(Vec<u8>, usize, Option<usize>)> =
+                    Vec::with_capacity(items.len());
+                let mut i = 0;
+                while i + 1 < items.len() {
+                    let (l, r) = (&items[i], &items[i + 1]);
+                    if l.1 <= k && r.1 <= k && l.0 == *ka && r.0 == *kb {
+                        let mut t = l.0.clone();
+                        t.extend_from_slice(&r.0);
+                        out.push((t, k + 1, None));
+                        i += 2;
+                    } else {
+                        out.push(items[i].clone());
+                        i += 1;
+                    }
+                }
+                if i < items.len() {
+                    out.push(items[i].clone());
+                }
+                items = out;
+            }
+
+            let changed_child = |c: &GraphV| {
+                crate::graph::arc_ptr(c).and_then(|p| final_of.get(&p)).cloned()
+            };
+            if !any_event && !children.iter().any(|c| changed_child(c).is_some()) {
+                return;
+            }
+            let mut new_children: Vec<GraphV> = items
+                .into_iter()
+                .map(|(bytes, _, src)| match src {
+                    Some(j) => changed_child(&children[j]).unwrap_or_else(|| children[j].clone()),
+                    None => GraphV::Node(bytes),
+                })
+                .collect();
+            *doc = if new_children.len() == 1 {
+                new_children.pop().unwrap()
+            } else {
+                GraphV::new_seq(new_children)
+            };
+        });
     }
 }
