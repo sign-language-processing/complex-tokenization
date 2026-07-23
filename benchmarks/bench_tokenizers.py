@@ -28,7 +28,7 @@ except ImportError:
     fast = None
 
 
-def bench(name, train):
+def bench(rows, name, impl, train):
     tracemalloc.start()
     start = time.perf_counter()
     merges = train()
@@ -36,16 +36,15 @@ def bench(name, train):
     _, peak_mem = tracemalloc.get_traced_memory()
     tracemalloc.stop()
     digest = hashlib.md5(repr(list(merges)).encode()).hexdigest()[:10]
-    print(f"{name:30s}  {elapsed:8.3f}s  {peak_mem / 1024 / 1024:8.2f} MB  "
-          f"merges={len(merges):4d}  digest={digest}")
+    rows.append(f"| {name} | {impl} | {elapsed:.3f}s | {peak_mem / 1024 / 1024:.2f} MB "
+                f"| {len(merges)} | `{digest}` |")
 
 
-def run_benchmarks(module, label, texts, num_merges):
-    print(f"\n[{label}]")
-    bench("BPE", lambda: module.BPETokenizer().train(texts, num_merges=num_merges))
-    bench("BNE n=4", lambda: module.BNETokenizer(n=4).train(texts, num_merges=num_merges))
-    bench("Boundless BPE", lambda: module.BoundlessBPETokenizer().train(texts, num_merges=num_merges))
-    bench("Super BPE", lambda: module.SuperBPETokenizer().train(texts, num_merges=num_merges))
+def run_benchmarks(rows, module, impl, texts, num_merges):
+    bench(rows, "BPE", impl, lambda: module.BPETokenizer().train(texts, num_merges=num_merges))
+    bench(rows, "BNE n=4", impl, lambda: module.BNETokenizer(n=4).train(texts, num_merges=num_merges))
+    bench(rows, "Boundless BPE", impl, lambda: module.BoundlessBPETokenizer().train(texts, num_merges=num_merges))
+    bench(rows, "Super BPE", impl, lambda: module.SuperBPETokenizer().train(texts, num_merges=num_merges))
 
 
 if __name__ == "__main__":
@@ -56,11 +55,24 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     texts = [t for t in text_dataset(max_samples=args.samples or None) if t.strip()]
-    print(f"Corpus: {len(texts):,} documents, {sum(len(t) for t in texts):,} characters"
-          f" | {args.merges} merges")
-    print(f"{'Tokenizer':30s}  {'Time':>9s}  {'Peak Mem':>11s}")
 
-    bench("HuggingFace BPE", lambda: train_huggingface_tokenizer(texts, num_merges=args.merges))
-    run_benchmarks(reference, "reference (Python)", texts, args.merges)
+    # Warm lazy imports and module-level caches, so the first row's peak
+    # memory doesn't absorb one-time allocations the later rows reuse.
+    train_huggingface_tokenizer(["warm up"], num_merges=1)
+    reference.BPETokenizer().train(["warm up"], num_merges=1)
     if fast is not None:
-        run_benchmarks(fast, "fast (Rust)", texts, args.merges)
+        fast.BPETokenizer().train(["warm up"], num_merges=1)
+
+    # Rows are collected and the table printed at the end, because library
+    # progress bars (HF tokenizers) write straight to the OS fd mid-run.
+    rows = []
+    bench(rows, "BPE", "HuggingFace", lambda: train_huggingface_tokenizer(texts, num_merges=args.merges))
+    run_benchmarks(rows, reference, "reference (Python)", texts, args.merges)
+    if fast is not None:
+        run_benchmarks(rows, fast, "fast (Rust)", texts, args.merges)
+
+    print(f"\nCorpus: {len(texts):,} documents, {sum(len(t) for t in texts):,} characters"
+          f" | {args.merges} merges\n")
+    print("| Tokenizer | Implementation | Time | Peak mem | Merges | Digest |")
+    print("|---|---|--:|--:|--:|---|")
+    print("\n".join(rows))
