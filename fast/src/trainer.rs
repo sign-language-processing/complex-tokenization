@@ -442,9 +442,13 @@ fn train_entries_delta(
 
         let affected: Vec<u32> = index.get(&nodes).cloned().unwrap_or_default();
 
-        for &idx in &affected {
-            let entry = &mut entries[idx as usize];
-            let freq = entry.freq;
+        // Apply the merge and recount each affected entry, producing (idx, old
+        // candidates) for entries that actually changed. This is the hot phase
+        // (recount dominates), so run it in parallel across affected entries;
+        // the delta bookkeeping below stays serial since it mutates `global`
+        // and `index`. Order does not affect output: count updates are additive
+        // and pick_best_entries reads index vectors via `min()`.
+        let apply_one = |entry: &mut WordEntry| -> Option<FxHashMap<Vec<GraphV>, usize>> {
             let old = std::mem::take(&mut entry.candidates);
             let changed = if use_try {
                 entry.apply_merge_try(&token, &nodes)
@@ -452,37 +456,90 @@ fn train_entries_delta(
                 entry.apply_merge(&token, &nodes);
                 true
             };
-            if !changed {
+            if changed {
+                Some(old)
+            } else {
                 entry.candidates = old;
-                continue;
+                None
             }
-            let new = &entry.candidates;
+        };
 
-            for (cand, &old_c) in &old {
+        let changes: Vec<(u32, FxHashMap<Vec<GraphV>, usize>)> = if affected.len() >= 64 {
+            let mut mask = vec![false; entries.len()];
+            for &idx in &affected {
+                mask[idx as usize] = true;
+            }
+            entries
+                .par_iter_mut()
+                .enumerate()
+                .filter_map(|(i, entry)| {
+                    if !mask[i] {
+                        return None;
+                    }
+                    apply_one(entry).map(|old| (i as u32, old))
+                })
+                .collect()
+        } else {
+            affected
+                .iter()
+                .filter_map(|&idx| apply_one(&mut entries[idx as usize]).map(|old| (idx, old)))
+                .collect()
+        };
+
+        // Diff each changed entry's old vs new candidate maps. Recount rebuilds
+        // the full doc map, but only a handful of candidates near the merge
+        // actually change; the diff (deep-hash lookups over the full maps) is
+        // the serial hot spot. Compute the per-entry diffs in parallel — they
+        // read only that entry's own maps — then apply the (few) real changes
+        // to the shared `global`/`index` serially.
+        type Diff = (Vec<(Vec<GraphV>, usize, bool)>, Vec<(Vec<GraphV>, usize, bool)>);
+        let diff_one = |idx: u32, old: &FxHashMap<Vec<GraphV>, usize>| -> (u32, Diff) {
+            let entry = &entries[idx as usize];
+            let freq = entry.freq;
+            let new = &entry.candidates;
+            let mut decr = Vec::new();
+            let mut incr = Vec::new();
+            for (cand, &old_c) in old {
                 let new_c = new.get(cand).copied().unwrap_or(0);
                 if new_c < old_c {
-                    let g = global.get_mut(cand).unwrap();
-                    *g -= (old_c - new_c) * freq;
-                    if *g == 0 {
-                        global.remove(cand);
-                    }
-                    if new_c == 0 {
-                        if let Some(v) = index.get_mut(cand) {
-                            if let Some(pos) = v.iter().position(|&x| x == idx) {
-                                v.swap_remove(pos);
-                            }
-                        }
-                    }
+                    decr.push((cand.clone(), (old_c - new_c) * freq, new_c == 0));
                 }
             }
             for (cand, &new_c) in new {
                 let old_c = old.get(cand).copied().unwrap_or(0);
                 if new_c > old_c {
-                    *global.entry(cand.clone()).or_insert(0) += (new_c - old_c) * freq;
-                    if old_c == 0 {
-                        index.entry(cand.clone()).or_default().push(idx);
+                    incr.push((cand.clone(), (new_c - old_c) * freq, old_c == 0));
+                }
+            }
+            (idx, (decr, incr))
+        };
+
+        let diffs: Vec<(u32, Diff)> = if changes.len() >= 64 {
+            changes.par_iter().map(|(idx, old)| diff_one(*idx, old)).collect()
+        } else {
+            changes.iter().map(|(idx, old)| diff_one(*idx, old)).collect()
+        };
+
+        for (idx, (decr, incr)) in diffs {
+            for (cand, amount, remove) in decr {
+                let g = global.get_mut(&cand).unwrap();
+                *g -= amount;
+                if *g == 0 {
+                    global.remove(&cand);
+                }
+                if remove {
+                    if let Some(v) = index.get_mut(&cand) {
+                        if let Some(pos) = v.iter().position(|&x| x == idx) {
+                            v.swap_remove(pos);
+                        }
                     }
                 }
+            }
+            for (cand, amount, add) in incr {
+                if add {
+                    index.entry(cand.clone()).or_default().push(idx);
+                }
+                *global.entry(cand).or_insert(0) += amount;
             }
         }
 
@@ -946,7 +1003,20 @@ impl Trainer {
             .iter()
             .map(|item| pyobject_to_graphv(&item))
             .collect::<PyResult<_>>()?;
-        self.graph = self.graph.merge(&token_g, &merge_nodes);
+        // Applying pre-merges to a corpus (e.g. SuperBPE phase-1 → phase-2) walks
+        // every document. Parallelize over the Unconn subgraphs with memoized
+        // try_merge; identical to a serial `merge` since try_merge only skips
+        // rebuilding unchanged subtrees.
+        if let GraphV::Unconn(subs_arc) = &mut self.graph {
+            let subs = Arc::make_mut(subs_arc);
+            subs.par_iter_mut().for_each(|sg| {
+                if let Some(new_sg) = sg.try_merge(&token_g, &merge_nodes) {
+                    *sg = new_sg;
+                }
+            });
+        } else {
+            self.graph = self.graph.merge(&token_g, &merge_nodes);
+        }
         self.merges.push((token_g, merge_nodes));
         Ok(())
     }
