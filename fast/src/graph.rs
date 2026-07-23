@@ -389,7 +389,7 @@ fn fullconn_first_merge_in(nodes: &[GraphV], wanted: &FxHashSet<Vec<GraphV>>) ->
 /// position exactly as `seq_emit_merges` does. Count-identical to walking
 /// `emit_merges` (counts are summed, order-independent), but O(unique children)
 /// instead of O(occurrences) when duplicate children are pointer-shared.
-pub fn seq_recount(nodes: &[GraphV], out: &mut FxHashMap<Vec<GraphV>, usize>) {
+pub fn seq_recount(nodes: &[GraphV], out: &mut dyn FnMut(Vec<GraphV>, usize)) {
     let only_minimal = ONLY_MINIMAL_MERGES.load(Ordering::Relaxed);
     let max_size = MAX_MERGE_SIZE.load(Ordering::Relaxed);
     let num_nodes = nodes.len();
@@ -409,10 +409,10 @@ pub fn seq_recount(nodes: &[GraphV], out: &mut FxHashMap<Vec<GraphV>, usize>) {
                 Some(p) => {
                     if done.insert(p, ()).is_none() {
                         let w = ptr_count[&p];
-                        n.emit_merges(&mut |m| *out.entry(m).or_insert(0) += w);
+                        n.emit_merges(&mut |m| out(m, w));
                     }
                 }
-                None => n.emit_merges(&mut |m| *out.entry(m).or_insert(0) += 1),
+                None => n.emit_merges(&mut |m| out(m, 1)),
             },
         }
     }
@@ -427,9 +427,9 @@ pub fn seq_recount(nodes: &[GraphV], out: &mut FxHashMap<Vec<GraphV>, usize>) {
                 break;
             }
             if j - i == 2 {
-                *out.entry(vec![nodes[i].clone(), nodes[j - 1].clone()]).or_insert(0) += 1;
+                out(vec![nodes[i].clone(), nodes[j - 1].clone()], 1);
             } else {
-                *out.entry(nodes[i..j].to_vec()).or_insert(0) += 1;
+                out(nodes[i..j].to_vec(), 1);
             }
         }
     }

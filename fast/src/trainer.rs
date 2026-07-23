@@ -71,6 +71,50 @@ fn pick_best_by_scan<'a>(
     graphs.find_map(|g| first_in_ties(g, &ties))
 }
 
+/// `pick_best_by_scan` over key-typed count shards; ties resolve by first
+/// emit-order appearance while scanning `graphs`. Returns key and value.
+fn pick_best_by_scan_keys<'a>(
+    shards: &[FxHashMap<CandKey, usize>],
+    interner: &CandInterner,
+    graphs: impl Iterator<Item = &'a GraphV>,
+) -> Option<(CandKey, Vec<GraphV>)> {
+    let mut best_score = 0;
+    let mut best_key: Option<CandKey> = None;
+    let mut tie = false;
+    for shard in shards {
+        for (&k, &c) in shard {
+            let s = key_score(k, c);
+            if s == 0 {
+                continue;
+            }
+            if s > best_score {
+                best_score = s;
+                best_key = Some(k);
+                tie = false;
+            } else if s == best_score {
+                tie = true;
+            }
+        }
+    }
+    let best_key = best_key?;
+    if !tie {
+        return Some((best_key, interner.value(best_key)));
+    }
+    let mut by_value: FxHashMap<Vec<GraphV>, CandKey> = FxHashMap::default();
+    for shard in shards {
+        for (&k, &c) in shard {
+            if key_score(k, c) == best_score {
+                by_value.insert(interner.value(k), k);
+            }
+        }
+    }
+    let ties: FxHashSet<Vec<GraphV>> = by_value.keys().cloned().collect();
+    let mut graphs = graphs;
+    let winner = graphs.find_map(|g| first_in_ties(g, &ties))?;
+    let key = by_value[&winner];
+    Some((key, winner))
+}
+
 /// Tie-break for the connected streaming path: scan documents in order, each
 /// assembled on the fly, and take the first tied candidate.
 fn pick_best_docs(
@@ -93,6 +137,145 @@ fn pick_best_docs(
 /// (shard tasks never touch the same candidate). Number of shards is a
 /// power of two so routing is a mask.
 const CAND_SHARDS: usize = 16;
+
+/// Candidate key: content packed into the integer (tag bit set) for all-Node
+/// candidates of 2..=4 elements totalling <= 13 bytes — bijective, lock-free,
+/// no table — or a spill-table id (tag clear) embedding the candidate length
+/// so scores never need the table.
+type CandKey = u128;
+
+const PACK_TAG: u128 = 1 << 127;
+
+fn pack_cand(cand: &[GraphV]) -> Option<CandKey> {
+    let k = cand.len();
+    if !(2..=4).contains(&k) {
+        return None;
+    }
+    let mut total = 0usize;
+    for g in cand {
+        let GraphV::Node(b) = g else { return None };
+        if b.len() > 15 {
+            return None;
+        }
+        total += b.len();
+    }
+    if total > 13 {
+        return None;
+    }
+    let mut v = PACK_TAG | (((k - 2) as u128) << 120);
+    let mut lenshift = 104u32;
+    let mut byteshift = 0u32;
+    for g in cand {
+        let GraphV::Node(b) = g else { unreachable!() };
+        v |= (b.len() as u128) << lenshift;
+        lenshift += 4;
+        for &byte in b {
+            v |= (byte as u128) << byteshift;
+            byteshift += 8;
+        }
+    }
+    Some(v)
+}
+
+fn unpack_cand(v: CandKey) -> Vec<GraphV> {
+    let k = ((v >> 120) & 0x3) as usize + 2;
+    let mut out = Vec::with_capacity(k);
+    let mut lenshift = 104u32;
+    let mut byteshift = 0u32;
+    for _ in 0..k {
+        let len = ((v >> lenshift) & 0xf) as usize;
+        lenshift += 4;
+        let mut b = Vec::with_capacity(len);
+        for _ in 0..len {
+            b.push(((v >> byteshift) & 0xff) as u8);
+            byteshift += 8;
+        }
+        out.push(GraphV::Node(b));
+    }
+    out
+}
+
+/// Candidate element count, from the key alone.
+fn key_len(v: CandKey) -> usize {
+    if v & PACK_TAG != 0 {
+        ((v >> 120) & 0x3) as usize + 2
+    } else {
+        ((v >> 96) & 0xffff) as usize
+    }
+}
+
+fn key_score(v: CandKey, count: usize) -> usize {
+    (key_len(v) - 1) * count
+}
+
+fn key_shard(v: CandKey) -> usize {
+    use std::hash::{Hash, Hasher};
+    let mut h = rustc_hash::FxHasher::default();
+    v.hash(&mut h);
+    (h.finish() as usize) & (CAND_SHARDS - 1)
+}
+
+// One spill shard: candidate -> local id, and local id -> candidate.
+type SpillShard = (FxHashMap<Vec<GraphV>, u32>, Vec<Vec<GraphV>>);
+
+/// Spill table for candidates that don't pack (long, >4-ary, or non-Node).
+struct CandInterner {
+    shards: Vec<std::sync::Mutex<SpillShard>>,
+}
+
+impl CandInterner {
+    fn new() -> Self {
+        CandInterner {
+            shards: (0..CAND_SHARDS)
+                .map(|_| std::sync::Mutex::new((FxHashMap::default(), Vec::new())))
+                .collect(),
+        }
+    }
+
+    fn key(&self, cand: &[GraphV]) -> CandKey {
+        if let Some(v) = pack_cand(cand) {
+            return v;
+        }
+        let s = cand_shard(cand);
+        let mut shard = self.shards[s].lock().unwrap();
+        let (map, names) = &mut *shard;
+        let local = match map.get(cand) {
+            Some(&i) => i,
+            None => {
+                let i = names.len() as u32;
+                map.insert(cand.to_vec(), i);
+                names.push(cand.to_vec());
+                i
+            }
+        };
+        ((cand.len() as u128) << 96) | ((s as u128) << 32) | local as u128
+    }
+
+    fn value(&self, v: CandKey) -> Vec<GraphV> {
+        if v & PACK_TAG != 0 {
+            return unpack_cand(v);
+        }
+        let s = ((v >> 32) & 0xffff) as usize;
+        let local = (v & 0xffff_ffff) as usize;
+        self.shards[s].lock().unwrap().1[local].clone()
+    }
+}
+
+/// Pair key without building a Vec — the layout matches `pack_cand` exactly.
+fn pair_key(a: &GraphV, b: &GraphV, interner: &CandInterner) -> CandKey {
+    if let (GraphV::Node(x), GraphV::Node(y)) = (a, b) {
+        if x.len() <= 15 && y.len() <= 15 && x.len() + y.len() <= 13 {
+            let mut v = PACK_TAG | ((x.len() as u128) << 104) | ((y.len() as u128) << 108);
+            let mut shift = 0u32;
+            for &byte in x.iter().chain(y.iter()) {
+                v |= (byte as u128) << shift;
+                shift += 8;
+            }
+            return v;
+        }
+    }
+    interner.key(&[a.clone(), b.clone()])
+}
 
 fn cand_shard(cand: &[GraphV]) -> usize {
     use std::hash::{Hash, Hasher};
@@ -131,22 +314,28 @@ fn best_and_tie_sharded(
 
 /// Tie-break over unique entries in first-occurrence order, using the inverted
 /// index to jump straight to the earliest entry holding a tied candidate.
+/// Returns the chosen candidate's key and value.
 fn pick_best_entries(
     queue: &PickQueue,
     entries: &[WordEntry],
-    index: &[FxHashMap<Vec<GraphV>, FxHashSet<u32>>],
-) -> Option<Vec<GraphV>> {
-    let (_, id_set) = queue.by_score.last_key_value()?;
-    if id_set.len() == 1 {
-        return Some(queue.name(*id_set.iter().next().unwrap()).clone());
+    index: &[FxHashMap<CandKey, FxHashSet<u32>>],
+    interner: &CandInterner,
+) -> Option<(CandKey, Vec<GraphV>)> {
+    let (_, key_set) = queue.by_score.last_key_value()?;
+    if key_set.len() == 1 {
+        let key = *key_set.iter().next().unwrap();
+        return Some((key, interner.value(key)));
     }
-    let ties: FxHashSet<Vec<GraphV>> =
-        id_set.iter().map(|&id| queue.name(id).clone()).collect();
-    let mi = ties
+    let by_value: FxHashMap<Vec<GraphV>, CandKey> =
+        key_set.iter().map(|&k| (interner.value(k), k)).collect();
+    let ties: FxHashSet<Vec<GraphV>> = by_value.keys().cloned().collect();
+    let mi = key_set
         .iter()
-        .filter_map(|c| index[cand_shard(c)].get(c).and_then(|v| v.iter().min()).copied())
+        .filter_map(|&k| index[key_shard(k)].get(&k).and_then(|v| v.iter().min()).copied())
         .min()?;
-    first_in_ties(&entries[mi as usize].graph, &ties)
+    let winner = first_in_ties(&entries[mi as usize].graph, &ties)?;
+    let key = by_value[&winner];
+    Some((key, winner))
 }
 
 fn make_token(nodes: &[GraphV]) -> GraphV {
@@ -408,17 +597,20 @@ fn train_unconn(
             entry.weighted = true;
         }
     }
+    let interner = std::sync::Arc::new(CandInterner::new());
     let mut registry = WordRegistry::new(
         canon
             .into_values()
             .filter_map(|g| crate::graph::arc_ptr(&g).map(|p| (p, g)))
             .collect(),
+        interner.clone(),
     );
-    entries.par_iter_mut().for_each(|entry| entry.recount());
+    entries.par_iter_mut().for_each(|entry| entry.recount(&interner));
 
     let pending = train_entries_delta(
         &mut entries,
         Some(&mut registry),
+        &interner,
         range_start,
         num_merges,
         verbose,
@@ -461,43 +653,48 @@ fn train_single(
 
 struct WordEntry {
     graph: GraphV,
-    candidates: FxHashMap<Vec<GraphV>, usize>,
+    candidates: FxHashMap<CandKey, usize>,
     freq: usize,
     // Connected giant Seq: recount via pointer-weighted dedup of shared children.
     weighted: bool,
 }
 
 impl WordEntry {
-    fn new(graph: GraphV, freq: usize) -> Self {
+    fn new(graph: GraphV, freq: usize, interner: &CandInterner) -> Self {
         let mut entry = WordEntry { graph, candidates: FxHashMap::default(), freq, weighted: false };
-        entry.recount();
+        entry.recount(interner);
         entry
     }
 
-    fn recount(&mut self) {
+    fn recount(&mut self, interner: &CandInterner) {
         self.candidates.clear();
         if self.weighted {
             if let GraphV::Seq(nodes) = &self.graph {
-                crate::graph::seq_recount(nodes, &mut self.candidates);
+                let cands = &mut self.candidates;
+                crate::graph::seq_recount(nodes, &mut |m, w| {
+                    *cands.entry(interner.key(&m)).or_insert(0) += w;
+                });
                 return;
             }
         }
-        self.graph.emit_merges(&mut |m| *self.candidates.entry(m).or_insert(0) += 1);
+        let cands = &mut self.candidates;
+        self.graph
+            .emit_merges(&mut |m| *cands.entry(interner.key(&m)).or_insert(0) += 1);
     }
 
-    fn apply_merge(&mut self, token: &GraphV, merge: &[GraphV]) {
+    fn apply_merge(&mut self, token: &GraphV, merge: &[GraphV], interner: &CandInterner) {
         self.graph = self.graph.merge(token, merge);
-        self.recount();
+        self.recount(interner);
     }
 
     // try_merge variant: matches the legacy Unconn path (apply_merge_parallel),
     // where seq_try_merge no-ops minimal merges of length > 2. Returns whether
     // the graph changed; candidates are only rebuilt on change.
-    fn apply_merge_try(&mut self, token: &GraphV, merge: &[GraphV]) -> bool {
+    fn apply_merge_try(&mut self, token: &GraphV, merge: &[GraphV], interner: &CandInterner) -> bool {
         match self.graph.try_merge(token, merge) {
             Some(g) => {
                 self.graph = g;
-                self.recount();
+                self.recount(interner);
                 true
             }
             None => false,
@@ -516,6 +713,7 @@ impl WordEntry {
         token: &GraphV,
         merge: &[GraphV],
         word_result: WordResult<'_>,
+        interner: &CandInterner,
     ) -> ApplyOutcome {
         use crate::settings::{MAX_MERGE_SIZE, ONLY_MINIMAL_MERGES};
         use std::sync::atomic::Ordering;
@@ -523,12 +721,12 @@ impl WordEntry {
             && MAX_MERGE_SIZE.load(Ordering::Relaxed) == 2
             && merge.len() == 2;
         if minimal_pairs && matches!(&self.graph, GraphV::Seq(_)) {
-            if let Some(outcome) = self.try_apply_incremental(token, merge, word_result) {
+            if let Some(outcome) = self.try_apply_incremental(token, merge, word_result, interner) {
                 return outcome;
             }
         }
         let old = std::mem::take(&mut self.candidates);
-        if self.apply_merge_try(token, merge) {
+        if self.apply_merge_try(token, merge, interner) {
             ApplyOutcome::Rebuilt(old)
         } else {
             self.candidates = old;
@@ -543,6 +741,7 @@ impl WordEntry {
         token: &GraphV,
         merge: &[GraphV],
         word_result: WordResult<'_>,
+        interner: &CandInterner,
     ) -> Option<ApplyOutcome> {
         let GraphV::Seq(nodes_arc) = &self.graph else { return None };
         let nodes: &[GraphV] = nodes_arc;
@@ -571,7 +770,7 @@ impl WordEntry {
         // merged children (no precomputed step delta)
         let mut changed_ptrs: FxHashMap<usize, (GraphV, GraphV, isize)> = FxHashMap::default();
         // old_ptr -> (precomputed word delta, occurrence count)
-        type SharedDelta<'a> = (&'a [(Vec<GraphV>, isize)], isize);
+        type SharedDelta<'a> = (&'a [(CandKey, isize)], isize);
         let mut changed_shared: FxHashMap<usize, SharedDelta<'_>> = FxHashMap::default();
         // ptr-less children (e.g. Tree) are counted per occurrence, matching seq_recount
         let mut changed_plain: Vec<(GraphV, GraphV)> = Vec::new();
@@ -582,7 +781,7 @@ impl WordEntry {
             }
             let ptr = crate::graph::arc_ptr(child);
             // Precomputed step delta available? (word came from the registry)
-            let mut shared_delta: Option<&[(Vec<GraphV>, isize)]> = None;
+            let mut shared_delta: Option<&[(CandKey, isize)]> = None;
             let merged = match (ptr, word_result) {
                 (Some(p), Some((changed, registry))) => match changed.get(&p) {
                     Some((new_g, deltas, _, _)) => {
@@ -621,20 +820,20 @@ impl WordEntry {
             return Some(ApplyOutcome::Unchanged);
         }
 
-        let mut delta: FxHashMap<Vec<GraphV>, isize> = FxHashMap::default();
+        let mut delta: FxHashMap<CandKey, isize> = FxHashMap::default();
         for (deltas, w) in changed_shared.values() {
-            for (cand, d) in *deltas {
-                *delta.entry(cand.clone()).or_insert(0) += d * w;
+            for &(cand, d) in *deltas {
+                *delta.entry(cand).or_insert(0) += d * w;
             }
         }
         for (old_c, new_c, w) in changed_ptrs.values() {
             let w = *w;
-            old_c.emit_merges(&mut |m| *delta.entry(m).or_insert(0) -= w);
-            new_c.emit_merges(&mut |m| *delta.entry(m).or_insert(0) += w);
+            old_c.emit_merges(&mut |m| *delta.entry(interner.key(&m)).or_insert(0) -= w);
+            new_c.emit_merges(&mut |m| *delta.entry(interner.key(&m)).or_insert(0) += w);
         }
         for (old_c, new_c) in &changed_plain {
-            old_c.emit_merges(&mut |m| *delta.entry(m).or_insert(0) -= 1);
-            new_c.emit_merges(&mut |m| *delta.entry(m).or_insert(0) += 1);
+            old_c.emit_merges(&mut |m| *delta.entry(interner.key(&m)).or_insert(0) -= 1);
+            new_c.emit_merges(&mut |m| *delta.entry(interner.key(&m)).or_insert(0) += 1);
         }
 
         // Boundary pairs: only pair positions touching a changed child can
@@ -655,14 +854,12 @@ impl WordEntry {
         for &p in &starts {
             if nodes[p].is_node() && nodes[p + 1].is_node() {
                 *delta
-                    .entry(vec![nodes[p].clone(), nodes[p + 1].clone()])
+                    .entry(pair_key(&nodes[p], &nodes[p + 1], interner))
                     .or_insert(0) -= 1;
             }
             let (np, nq) = (new_at(p), new_at(p + 1));
             if np.is_node() && nq.is_node() {
-                *delta
-                    .entry(vec![np.clone(), nq.clone()])
-                    .or_insert(0) += 1;
+                *delta.entry(pair_key(np, nq, interner)).or_insert(0) += 1;
             }
         }
 
@@ -682,14 +879,14 @@ impl WordEntry {
                     if removed {
                         self.candidates.remove(&cand);
                     }
-                    ops.push((cand_shard(&cand) as u8, true, removed, amt * freq, cand));
+                    ops.push((key_shard(cand) as u8, true, removed, amt * freq, cand));
                 }
                 std::cmp::Ordering::Greater => {
                     let d = d as usize;
-                    let cur = self.candidates.entry(cand.clone()).or_insert(0);
+                    let cur = self.candidates.entry(cand).or_insert(0);
                     let added = *cur == 0;
                     *cur += d;
-                    ops.push((cand_shard(&cand) as u8, false, added, d * freq, cand));
+                    ops.push((key_shard(cand) as u8, false, added, d * freq, cand));
                 }
             }
         }
@@ -713,61 +910,36 @@ impl WordEntry {
 /// never reused, and the tie rule is unchanged — the bucket at the max score
 /// is exactly the tied set, resolved by the existing earliest-entry logic.
 struct PickQueue {
-    by_score: std::collections::BTreeMap<usize, FxHashSet<u64>>,
-    ids: Vec<FxHashMap<Vec<GraphV>, u32>>,
-    names: Vec<Vec<Vec<GraphV>>>,
+    by_score: std::collections::BTreeMap<usize, FxHashSet<CandKey>>,
 }
 
-// (candidate id, score before, score after) — one count change.
-type ScoreTransition = (u64, usize, usize);
-
-fn intern(ids: &mut FxHashMap<Vec<GraphV>, u32>, names: &mut Vec<Vec<GraphV>>, cand: &[GraphV]) -> u32 {
-    if let Some(&i) = ids.get(cand) {
-        return i;
-    }
-    let i = names.len() as u32;
-    ids.insert(cand.to_vec(), i);
-    names.push(cand.to_vec());
-    i
-}
+// (candidate key, score before, score after) — one count change.
+type ScoreTransition = (CandKey, usize, usize);
 
 impl PickQueue {
-    fn new(global: &[FxHashMap<Vec<GraphV>, usize>]) -> Self {
-        let mut q = PickQueue {
-            by_score: std::collections::BTreeMap::new(),
-            ids: (0..CAND_SHARDS).map(|_| FxHashMap::default()).collect(),
-            names: (0..CAND_SHARDS).map(|_| Vec::new()).collect(),
-        };
-        for (s, shard) in global.iter().enumerate() {
-            for (cand, &count) in shard {
-                let local = intern(&mut q.ids[s], &mut q.names[s], cand);
-                let id = ((s as u64) << 32) | local as u64;
-                q.by_score
-                    .entry(merge_score(cand, count))
-                    .or_default()
-                    .insert(id);
+    fn new(global: &[FxHashMap<CandKey, usize>]) -> Self {
+        let mut q = PickQueue { by_score: std::collections::BTreeMap::new() };
+        for shard in global {
+            for (&key, &count) in shard {
+                q.by_score.entry(key_score(key, count)).or_default().insert(key);
             }
         }
         q
     }
 
-    fn name(&self, id: u64) -> &Vec<GraphV> {
-        &self.names[(id >> 32) as usize][(id & 0xffff_ffff) as usize]
-    }
-
     fn apply(&mut self, transitions: Vec<Vec<ScoreTransition>>) {
         for shard_ts in transitions {
-            for (id, old, new) in shard_ts {
+            for (key, old, new) in shard_ts {
                 if old > 0 {
                     if let Some(set) = self.by_score.get_mut(&old) {
-                        set.remove(&id);
+                        set.remove(&key);
                         if set.is_empty() {
                             self.by_score.remove(&old);
                         }
                     }
                 }
                 if new > 0 {
-                    self.by_score.entry(new).or_default().insert(id);
+                    self.by_score.entry(new).or_default().insert(key);
                 }
             }
         }
@@ -775,11 +947,13 @@ impl PickQueue {
 }
 
 /// Unique-word registry: ptr -> graph, plus an inverted index from candidate
-/// to the words containing it, so each step touches only the words that the
-/// chosen merge actually changes instead of scanning the whole registry.
+/// key to the words containing it, so each step touches only the words that
+/// the chosen merge actually changes. Shares the pipeline's interner so key
+/// spaces line up.
 pub(crate) struct WordRegistry {
     words: FxHashMap<usize, GraphV>,
-    by_cand: FxHashMap<Vec<GraphV>, FxHashSet<usize>>,
+    by_cand: FxHashMap<CandKey, FxHashSet<usize>>,
+    interner: std::sync::Arc<CandInterner>,
 }
 
 impl WordRegistry {
@@ -787,19 +961,21 @@ impl WordRegistry {
     /// index) and update both maps. Returns old ptr -> new graph.
     fn apply_merge_step(&mut self, token: &GraphV, merge: &[GraphV]) -> FxHashMap<usize, GraphV> {
         // (old ptr, new graph, old candidate keys, new candidate keys)
-        type ChangedWord = (usize, GraphV, Vec<Vec<GraphV>>, Vec<Vec<GraphV>>);
+        type ChangedWord = (usize, GraphV, Vec<CandKey>, Vec<CandKey>);
+        let key = self.interner.key(merge);
         let ptrs: Vec<usize> = self
             .by_cand
-            .get(merge)
+            .get(&key)
             .map(|set| set.iter().copied().collect())
             .unwrap_or_default();
+        let interner = &self.interner;
         let changed: Vec<ChangedWord> = ptrs
             .par_iter()
             .filter_map(|&p| {
                 let g = &self.words[&p];
                 let new_g = g.try_merge(token, merge)?;
-                let old_cands = g.get_merges();
-                let new_cands = new_g.get_merges();
+                let old_cands = g.get_merges().iter().map(|c| interner.key(c)).collect();
+                let new_cands = new_g.get_merges().iter().map(|c| interner.key(c)).collect();
                 Some((p, new_g, old_cands, new_cands))
             })
             .collect();
@@ -825,18 +1001,18 @@ impl WordRegistry {
         out
     }
 
-    fn new(words: FxHashMap<usize, GraphV>) -> Self {
-        let cands: Vec<(usize, Vec<Vec<GraphV>>)> = words
+    fn new(words: FxHashMap<usize, GraphV>, interner: std::sync::Arc<CandInterner>) -> Self {
+        let cands: Vec<(usize, Vec<CandKey>)> = words
             .par_iter()
-            .map(|(&p, g)| (p, g.get_merges()))
+            .map(|(&p, g)| (p, g.get_merges().iter().map(|c| interner.key(c)).collect()))
             .collect();
-        let mut by_cand: FxHashMap<Vec<GraphV>, FxHashSet<usize>> = FxHashMap::default();
+        let mut by_cand: FxHashMap<CandKey, FxHashSet<usize>> = FxHashMap::default();
         for (p, cs) in cands {
             for c in cs {
                 by_cand.entry(c).or_default().insert(p);
             }
         }
-        WordRegistry { words, by_cand }
+        WordRegistry { words, by_cand, interner }
     }
 }
 
@@ -844,17 +1020,17 @@ impl WordRegistry {
 // and the (changed, registry) pair the apply path resolves children against.
 // (new graph, candidate delta, old candidate keys, new candidate keys) —
 // the key sets drive the registry's inverted-index update.
-type WordChange = (GraphV, Vec<(Vec<GraphV>, isize)>, Vec<Vec<GraphV>>, Vec<Vec<GraphV>>);
+type WordChange = (GraphV, Vec<(CandKey, isize)>, Vec<CandKey>, Vec<CandKey>);
 type WordResult<'a> = Option<(&'a FxHashMap<usize, WordChange>, &'a FxHashMap<usize, GraphV>)>;
 
 // (shard, is_decr, left/entered-entry, freq-scaled amount, candidate) — one
 // global/index count update, pre-routed to its candidate shard.
-type CandOp = (u8, bool, bool, usize, Vec<GraphV>);
+type CandOp = (u8, bool, bool, usize, CandKey);
 
 enum ApplyOutcome {
     Unchanged,
     // Old candidate map; the new one has been rebuilt into `candidates`.
-    Rebuilt(FxHashMap<Vec<GraphV>, usize>),
+    Rebuilt(FxHashMap<CandKey, usize>),
     // Count updates ready for the sharded global/index apply.
     Delta(Vec<CandOp>),
 }
@@ -863,6 +1039,7 @@ enum ApplyOutcome {
 fn build_word_entries(
     doc_words: &[Vec<String>],
     cache: &HashMap<String, GraphV>,
+    interner: &CandInterner,
 ) -> Vec<WordEntry> {
     // First-occurrence order (like the reference's dict.fromkeys) so the
     // tie-break scan over entries matches traversal order.
@@ -881,7 +1058,7 @@ fn build_word_entries(
     }
     order
         .into_iter()
-        .filter_map(|w| cache.get(w).map(|g| WordEntry::new(g.clone(), freq_map[w])))
+        .filter_map(|w| cache.get(w).map(|g| WordEntry::new(g.clone(), freq_map[w], interner)))
         .collect()
 }
 
@@ -900,31 +1077,30 @@ fn build_doc_graph(words: &[String], cache: &HashMap<String, GraphV>, connected:
     }
 }
 
-fn build_global_counts(entries: &[WordEntry]) -> Vec<FxHashMap<Vec<GraphV>, usize>> {
+fn build_global_counts(entries: &[WordEntry]) -> Vec<FxHashMap<CandKey, usize>> {
     let n_threads = rayon::current_num_threads().max(1);
     let chunk_size = (entries.len() / n_threads).max(1);
 
-    let chunk_maps: Vec<Vec<FxHashMap<Vec<GraphV>, usize>>> = entries
+    let chunk_maps: Vec<Vec<FxHashMap<CandKey, usize>>> = entries
         .par_chunks(chunk_size)
         .map(|chunk| {
-            let mut local: Vec<FxHashMap<Vec<GraphV>, usize>> =
+            let mut local: Vec<FxHashMap<CandKey, usize>> =
                 (0..CAND_SHARDS).map(|_| FxHashMap::default()).collect();
             for entry in chunk {
-                for (merge, &count) in &entry.candidates {
-                    *local[cand_shard(merge)].entry(merge.clone()).or_insert(0) +=
-                        count * entry.freq;
+                for (&merge, &count) in &entry.candidates {
+                    *local[key_shard(merge)].entry(merge).or_insert(0) += count * entry.freq;
                 }
             }
             local
         })
         .collect();
 
-    let mut global: Vec<FxHashMap<Vec<GraphV>, usize>> =
+    let mut global: Vec<FxHashMap<CandKey, usize>> =
         (0..CAND_SHARDS).map(|_| FxHashMap::default()).collect();
     global.par_iter_mut().enumerate().for_each(|(s, shard)| {
         for chunk in &chunk_maps {
-            for (merge, &count) in &chunk[s] {
-                *shard.entry(merge.clone()).or_insert(0) += count;
+            for (&merge, &count) in &chunk[s] {
+                *shard.entry(merge).or_insert(0) += count;
             }
         }
     });
@@ -933,21 +1109,21 @@ fn build_global_counts(entries: &[WordEntry]) -> Vec<FxHashMap<Vec<GraphV>, usiz
 
 // Inverted index: candidate -> entry indices that currently contain it.
 // Each entry appears at most once per candidate (candidate keys are unique per entry).
-fn build_candidate_index(entries: &[WordEntry]) -> Vec<FxHashMap<Vec<GraphV>, FxHashSet<u32>>> {
+fn build_candidate_index(entries: &[WordEntry]) -> Vec<FxHashMap<CandKey, FxHashSet<u32>>> {
     let n_threads = rayon::current_num_threads().max(1);
     let chunk_size = (entries.len() / n_threads).max(1);
 
-    let chunk_maps: Vec<Vec<FxHashMap<Vec<GraphV>, FxHashSet<u32>>>> = entries
+    let chunk_maps: Vec<Vec<FxHashMap<CandKey, FxHashSet<u32>>>> = entries
         .par_chunks(chunk_size)
         .enumerate()
         .map(|(chunk_idx, chunk)| {
             let base = (chunk_idx * chunk_size) as u32;
-            let mut local: Vec<FxHashMap<Vec<GraphV>, FxHashSet<u32>>> =
+            let mut local: Vec<FxHashMap<CandKey, FxHashSet<u32>>> =
                 (0..CAND_SHARDS).map(|_| FxHashMap::default()).collect();
             for (offset, entry) in chunk.iter().enumerate() {
-                for cand in entry.candidates.keys() {
-                    local[cand_shard(cand)]
-                        .entry(cand.clone())
+                for &cand in entry.candidates.keys() {
+                    local[key_shard(cand)]
+                        .entry(cand)
                         .or_default()
                         .insert(base + offset as u32);
                 }
@@ -956,12 +1132,12 @@ fn build_candidate_index(entries: &[WordEntry]) -> Vec<FxHashMap<Vec<GraphV>, Fx
         })
         .collect();
 
-    let mut index: Vec<FxHashMap<Vec<GraphV>, FxHashSet<u32>>> =
+    let mut index: Vec<FxHashMap<CandKey, FxHashSet<u32>>> =
         (0..CAND_SHARDS).map(|_| FxHashMap::default()).collect();
     index.par_iter_mut().enumerate().for_each(|(s, shard)| {
         for chunk in &chunk_maps {
-            for (cand, idxs) in &chunk[s] {
-                shard.entry(cand.clone()).or_default().extend(idxs.iter().copied());
+            for (&cand, idxs) in &chunk[s] {
+                shard.entry(cand).or_default().extend(idxs.iter().copied());
             }
         }
     });
@@ -976,6 +1152,7 @@ fn build_candidate_index(entries: &[WordEntry]) -> Vec<FxHashMap<Vec<GraphV>, Fx
 fn train_entries_delta(
     entries: &mut Vec<WordEntry>,
     mut registry: Option<&mut WordRegistry>,
+    interner: &CandInterner,
     range_start: usize,
     num_merges: usize,
     verbose: bool,
@@ -987,16 +1164,16 @@ fn train_entries_delta(
     let mut queue = PickQueue::new(&global);
 
     for _ in range_start..num_merges {
-        let Some(nodes) = pick_best_entries(&queue, entries, &index) else {
+        let Some((chosen, nodes)) = pick_best_entries(&queue, entries, &index, interner) else {
             break;
         };
         let token = make_token(&nodes);
         if verbose {
-            println!("Merging {:?} count={}", nodes, global[cand_shard(&nodes)][&nodes]);
+            println!("Merging {:?} count={}", nodes, global[key_shard(chosen)][&chosen]);
         }
 
-        let affected: Vec<u32> = index[cand_shard(&nodes)]
-            .get(&nodes)
+        let affected: Vec<u32> = index[key_shard(chosen)]
+            .get(&chosen)
             .map(|set| set.iter().copied().collect())
             .unwrap_or_default();
 
@@ -1010,7 +1187,7 @@ fn train_entries_delta(
             registry.as_deref().map(|reg| {
                 let ptrs: Vec<usize> = reg
                     .by_cand
-                    .get(&nodes)
+                    .get(&chosen)
                     .map(|set| set.iter().copied().collect())
                     .unwrap_or_default();
                 ptrs.par_iter()
@@ -1020,24 +1197,24 @@ fn train_entries_delta(
                         // This word's candidate delta, computed once per step
                         // and shared by every doc containing the word. The
                         // old/new key sets also drive the index update below.
-                        let mut old_c: FxHashMap<Vec<GraphV>, isize> = FxHashMap::default();
-                        let mut new_c: FxHashMap<Vec<GraphV>, isize> = FxHashMap::default();
-                        g.emit_merges(&mut |m| *old_c.entry(m).or_insert(0) += 1);
-                        new_g.emit_merges(&mut |m| *new_c.entry(m).or_insert(0) += 1);
-                        let mut deltas: Vec<(Vec<GraphV>, isize)> = Vec::new();
-                        for (cand, &n) in &new_c {
-                            let o = old_c.get(cand).copied().unwrap_or(0);
+                        let mut old_c: FxHashMap<CandKey, isize> = FxHashMap::default();
+                        let mut new_c: FxHashMap<CandKey, isize> = FxHashMap::default();
+                        g.emit_merges(&mut |m| *old_c.entry(interner.key(&m)).or_insert(0) += 1);
+                        new_g.emit_merges(&mut |m| *new_c.entry(interner.key(&m)).or_insert(0) += 1);
+                        let mut deltas: Vec<(CandKey, isize)> = Vec::new();
+                        for (&cand, &n) in &new_c {
+                            let o = old_c.get(&cand).copied().unwrap_or(0);
                             if n != o {
-                                deltas.push((cand.clone(), n - o));
+                                deltas.push((cand, n - o));
                             }
                         }
-                        for (cand, &o) in &old_c {
-                            if !new_c.contains_key(cand) {
-                                deltas.push((cand.clone(), -o));
+                        for (&cand, &o) in &old_c {
+                            if !new_c.contains_key(&cand) {
+                                deltas.push((cand, -o));
                             }
                         }
-                        let old_cands: Vec<Vec<GraphV>> = old_c.into_keys().collect();
-                        let new_cands: Vec<Vec<GraphV>> = new_c.into_keys().collect();
+                        let old_cands: Vec<CandKey> = old_c.into_keys().collect();
+                        let new_cands: Vec<CandKey> = new_c.into_keys().collect();
                         Some((p, (new_g, deltas, old_cands, new_cands)))
                     })
                     .collect()
@@ -1055,8 +1232,8 @@ fn train_entries_delta(
                 }
                 if let Some(np) = crate::graph::arc_ptr(new_g) {
                     reg.words.insert(np, new_g.clone());
-                    for cand in new_cands {
-                        reg.by_cand.entry(cand.clone()).or_default().insert(np);
+                    for &cand in new_cands {
+                        reg.by_cand.entry(cand).or_default().insert(np);
                     }
                 }
             }
@@ -1075,10 +1252,10 @@ fn train_entries_delta(
         // `min()`.
         let apply_one = |entry: &mut WordEntry| -> Option<ApplyOutcome> {
             let outcome = if use_try {
-                entry.apply_merge_try_outcome(&token, &nodes, word_result)
+                entry.apply_merge_try_outcome(&token, &nodes, word_result, interner)
             } else {
                 let old = std::mem::take(&mut entry.candidates);
-                entry.apply_merge(&token, &nodes);
+                entry.apply_merge(&token, &nodes, interner);
                 ApplyOutcome::Rebuilt(old)
             };
             match outcome {
@@ -1115,33 +1292,21 @@ fn train_entries_delta(
         // worker free its entry's old map (dropping those maps costs more than
         // the diff itself when done serially at end of scope). Delta outcomes
         // pass straight through.
-        let diff_one = |idx: u32, old: &FxHashMap<Vec<GraphV>, usize>| -> Vec<CandOp> {
+        let diff_one = |idx: u32, old: &FxHashMap<CandKey, usize>| -> Vec<CandOp> {
             let entry = &entries[idx as usize];
             let freq = entry.freq;
             let new = &entry.candidates;
             let mut ops = Vec::new();
-            for (cand, &old_c) in old {
-                let new_c = new.get(cand).copied().unwrap_or(0);
+            for (&cand, &old_c) in old {
+                let new_c = new.get(&cand).copied().unwrap_or(0);
                 if new_c < old_c {
-                    ops.push((
-                        cand_shard(cand) as u8,
-                        true,
-                        new_c == 0,
-                        (old_c - new_c) * freq,
-                        cand.clone(),
-                    ));
+                    ops.push((key_shard(cand) as u8, true, new_c == 0, (old_c - new_c) * freq, cand));
                 }
             }
-            for (cand, &new_c) in new {
-                let old_c = old.get(cand).copied().unwrap_or(0);
+            for (&cand, &new_c) in new {
+                let old_c = old.get(&cand).copied().unwrap_or(0);
                 if new_c > old_c {
-                    ops.push((
-                        cand_shard(cand) as u8,
-                        false,
-                        old_c == 0,
-                        (new_c - old_c) * freq,
-                        cand.clone(),
-                    ));
+                    ops.push((key_shard(cand) as u8, false, old_c == 0, (new_c - old_c) * freq, cand));
                 }
             }
             ops
@@ -1174,14 +1339,8 @@ fn train_entries_delta(
         }
         let transitions: Vec<Vec<ScoreTransition>> = buckets
             .into_par_iter()
-            .enumerate()
-            .zip(
-                global
-                    .par_iter_mut()
-                    .zip(index.par_iter_mut())
-                    .zip(queue.ids.par_iter_mut().zip(queue.names.par_iter_mut())),
-            )
-            .map(|((s, bucket), ((gshard, ishard), (idshard, nameshard)))| {
+            .zip(global.par_iter_mut().zip(index.par_iter_mut()))
+            .map(|(bucket, (gshard, ishard))| {
                 let mut trans: Vec<ScoreTransition> = Vec::with_capacity(bucket.len());
                 for (idx, (_, is_decr, flag, amount, cand)) in bucket {
                     if is_decr {
@@ -1197,20 +1356,16 @@ fn train_entries_delta(
                                 v.remove(&idx);
                             }
                         }
-                        let local = intern(idshard, nameshard, &cand);
-                        let id = ((s as u64) << 32) | local as u64;
-                        trans.push((id, merge_score(&cand, old), merge_score(&cand, new)));
+                        trans.push((cand, key_score(cand, old), key_score(cand, new)));
                     } else {
                         if flag {
-                            ishard.entry(cand.clone()).or_default().insert(idx);
+                            ishard.entry(cand).or_default().insert(idx);
                         }
-                        let g = gshard.entry(cand.clone()).or_insert(0);
+                        let g = gshard.entry(cand).or_insert(0);
                         let old = *g;
                         *g += amount;
                         let new = *g;
-                        let local = intern(idshard, nameshard, &cand);
-                        let id = ((s as u64) << 32) | local as u64;
-                        trans.push((id, merge_score(&cand, old), merge_score(&cand, new)));
+                        trans.push((cand, key_score(cand, old), key_score(cand, new)));
                     }
                 }
                 trans
@@ -1225,11 +1380,12 @@ fn train_entries_delta(
 // Disconnected streaming: word-level candidate caching via the delta+index loop.
 fn train_streaming_disconnected(
     entries: &mut Vec<WordEntry>,
+    interner: &CandInterner,
     range_start: usize,
     num_merges: usize,
     verbose: bool,
 ) -> Vec<(GraphV, Vec<GraphV>)> {
-    train_entries_delta(entries, None, range_start, num_merges, verbose, false)
+    train_entries_delta(entries, None, interner, range_start, num_merges, verbose, false)
 }
 
 // Connected: must assemble doc graphs for cross-word pairs
@@ -1298,8 +1454,10 @@ fn train_streaming(
     let pending = if connected {
         train_streaming_connected(doc_words, &mut cache, range_start, num_merges, verbose)
     } else {
-        let mut entries = build_word_entries(doc_words, &cache);
-        let result = train_streaming_disconnected(&mut entries, range_start, num_merges, verbose);
+        let interner = CandInterner::new();
+        let mut entries = build_word_entries(doc_words, &cache, &interner);
+        let result =
+            train_streaming_disconnected(&mut entries, &interner, range_start, num_merges, verbose);
         // Write back updated graphs to cache
         cache.clear();
         // We lost the string keys during entry building, so just update the word cache
@@ -1330,7 +1488,8 @@ fn train_streaming_with_counts(
     let mut cache = snapshot_word_cache();
 
     if !connected {
-        let mut entries = build_word_entries(doc_words, &cache);
+        let interner = CandInterner::new();
+        let mut entries = build_word_entries(doc_words, &cache, &interner);
 
         let node_count = |entries: &[WordEntry]| -> usize {
             entries.par_iter().map(|e| e.graph.node_count() * e.freq).sum()
@@ -1342,12 +1501,16 @@ fn train_streaming_with_counts(
 
         for i in range_start..num_merges {
             let global = build_global_counts(&entries);
-            let Some(nodes) = pick_best_by_scan(&global, entries.iter().map(|e| &e.graph)) else { break };
+            let Some((chosen, nodes)) =
+                pick_best_by_scan_keys(&global, &interner, entries.iter().map(|e| &e.graph))
+            else {
+                break;
+            };
             let token = make_token(&nodes);
 
             entries.par_iter_mut().for_each(|entry| {
-                if entry.candidates.contains_key(&nodes) {
-                    entry.apply_merge(&token, &nodes);
+                if entry.candidates.contains_key(&chosen) {
+                    entry.apply_merge(&token, &nodes, &interner);
                 }
             });
 
@@ -1693,7 +1856,12 @@ impl Trainer {
             let subs = Arc::make_mut(subs_arc);
             let registry = self
                 .premerge_registry
-                .get_or_insert_with(|| WordRegistry::new(canonicalize_subs(subs)));
+                .get_or_insert_with(|| {
+                    WordRegistry::new(
+                        canonicalize_subs(subs),
+                        std::sync::Arc::new(CandInterner::new()),
+                    )
+                });
             apply_premerge(subs, registry, &token_g, &merge_nodes);
         } else {
             self.graph = self.graph.merge(&token_g, &merge_nodes);
