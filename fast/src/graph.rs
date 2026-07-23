@@ -10,7 +10,7 @@ use std::sync::Arc;
 /// and keep sharing one Arc, so pointer-based dedup survives across merge steps.
 pub type MergeMemo = FxHashMap<usize, Option<GraphV>>;
 
-fn arc_ptr(g: &GraphV) -> Option<usize> {
+pub(crate) fn arc_ptr(g: &GraphV) -> Option<usize> {
     match g {
         GraphV::Seq(a) | GraphV::FullConn(a) | GraphV::Unconn(a) => Some(Arc::as_ptr(a) as usize),
         _ => None,
