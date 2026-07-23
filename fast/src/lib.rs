@@ -22,6 +22,8 @@ fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(units::set_ids_reverse_dict_py, m)?)?;
     m.add_function(wrap_pyfunction!(units::warm_word_cache_py, m)?)?;
     m.add_function(wrap_pyfunction!(units::clear_word_cache, m)?)?;
+    m.add_function(wrap_pyfunction!(graph::bytes_to_str_py, m)?)?;
+    m.add_function(wrap_pyfunction!(graph::str_to_bytes_py, m)?)?;
     m.add_function(wrap_pyfunction!(sync_settings, m)?)?;
     Ok(())
 }

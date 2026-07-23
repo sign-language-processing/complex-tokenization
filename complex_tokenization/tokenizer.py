@@ -17,7 +17,7 @@ from functools import lru_cache, reduce
 
 from tokenizers.pre_tokenizers import PreTokenizer
 
-from complex_tokenization.graph import GraphVertex, Node
+from complex_tokenization.graph import GraphVertex, Node, str_to_bytes
 from complex_tokenization.graphs.settings import GraphSettings
 from complex_tokenization.graphs.units import characters, register_script, utf8, utf8_clusters
 from complex_tokenization.graphs.words import GPTPretokenizer, words
@@ -82,7 +82,7 @@ class Tokenizer:
         trainer = Trainer(graphs=graphs)
 
         for merge_strs in self.merges:
-            nodes = tuple(Node(value=s.encode("utf-8")) for s in merge_strs)
+            nodes = tuple(Node(value=str_to_bytes(s)) for s in merge_strs)
             token = reduce(lambda a, b: a + b, nodes)
             trainer.graph = trainer.graph.merge(token, nodes)
             trainer.merges.append((token, nodes))

@@ -82,6 +82,93 @@ impl Hash for GraphV {
     }
 }
 
+/// Lossless textual form of token bytes, byte-for-byte equal to the
+/// reference's `bytes_to_str`: literal backslashes doubled, valid UTF-8 runs
+/// kept as-is, and each byte of an invalid sequence escaped as lowercase
+/// \xNN. Error ranges mirror CPython's UTF-8 decoder (maximal valid
+/// subpart): the start byte plus any valid continuations seen before the
+/// failure form one range, escaped per byte.
+pub fn bytes_to_str(data: &[u8]) -> String {
+    // Length of the valid UTF-8 sequence at data[i..], or the error-range
+    // length as Err (>= 1). Continuation windows per CPython: E0 A0-BF,
+    // ED 80-9F, F0 90-BF, F4 80-8F, plain 80-BF elsewhere.
+    fn seq_len(data: &[u8], i: usize) -> Result<usize, usize> {
+        let b = data[i];
+        let (n, first_lo, first_hi) = match b {
+            0x00..=0x7f => return Ok(1),
+            0xc2..=0xdf => (2, 0x80, 0xbf),
+            0xe0 => (3, 0xa0, 0xbf),
+            0xe1..=0xec | 0xee..=0xef => (3, 0x80, 0xbf),
+            0xed => (3, 0x80, 0x9f),
+            0xf0 => (4, 0x90, 0xbf),
+            0xf1..=0xf3 => (4, 0x80, 0xbf),
+            0xf4 => (4, 0x80, 0x8f),
+            _ => return Err(1),
+        };
+        for k in 1..n {
+            let (lo, hi) = if k == 1 { (first_lo, first_hi) } else { (0x80, 0xbf) };
+            match data.get(i + k) {
+                Some(&c) if c >= lo && c <= hi => {}
+                _ => return Err(k),
+            }
+        }
+        Ok(n)
+    }
+
+    let mut out = String::with_capacity(data.len() + 8);
+    let mut i = 0;
+    while i < data.len() {
+        if data[i] == b'\\' {
+            out.push_str("\\\\");
+            i += 1;
+            continue;
+        }
+        match seq_len(data, i) {
+            Ok(n) => {
+                out.push_str(std::str::from_utf8(&data[i..i + n]).unwrap());
+                i += n;
+            }
+            Err(n) => {
+                for &b in &data[i..i + n] {
+                    out.push_str(&format!("\\x{b:02x}"));
+                }
+                i += n;
+            }
+        }
+    }
+    out
+}
+
+/// Exact inverse of `bytes_to_str`: on the UTF-8 bytes of `s`, a doubled
+/// backslash becomes one backslash, \xNN becomes that byte (doubled
+/// backslash wins, matching the reference's regex alternation order).
+pub fn str_to_bytes(s: &str) -> Vec<u8> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'\\' {
+            if b.get(i + 1) == Some(&b'\\') {
+                out.push(b'\\');
+                i += 2;
+                continue;
+            }
+            if b.get(i + 1) == Some(&b'x')
+                && b.get(i + 2).is_some_and(u8::is_ascii_hexdigit)
+                && b.get(i + 3).is_some_and(u8::is_ascii_hexdigit)
+            {
+                let hex = std::str::from_utf8(&b[i + 2..i + 4]).unwrap();
+                out.push(u8::from_str_radix(hex, 16).unwrap());
+                i += 4;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    out
+}
+
 impl GraphV {
     pub fn to_bytes(&self) -> Vec<u8> {
         match self {
@@ -114,8 +201,7 @@ impl GraphV {
     }
 
     pub fn to_str_repr(&self) -> String {
-        let bytes = self.to_bytes();
-        let s = String::from_utf8_lossy(&bytes).to_string();
+        let s = bytes_to_str(&self.to_bytes());
         // Try IDS character lookup
         if let Some(ch) = crate::units::get_character_for_ids_str(&s) {
             return ch;
@@ -561,6 +647,18 @@ fn fullconn_merge(nodes: &[GraphV], token: &GraphV, merge: &[GraphV]) -> GraphV 
         return GraphV::new_fullconn(nodes.to_vec());
     }
     GraphV::new_fullconn(new_nodes)
+}
+
+#[pyfunction]
+#[pyo3(name = "bytes_to_str")]
+pub fn bytes_to_str_py(data: Vec<u8>) -> String {
+    bytes_to_str(&data)
+}
+
+#[pyfunction]
+#[pyo3(name = "str_to_bytes")]
+pub fn str_to_bytes_py(py: Python<'_>, s: &str) -> PyObject {
+    pyo3::types::PyBytes::new(py, &str_to_bytes(s)).into()
 }
 
 // --- Python wrapper types ---
