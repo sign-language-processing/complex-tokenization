@@ -1,45 +1,66 @@
-"""Benchmark all tokenizer variants against each other and HuggingFace."""
+"""Benchmark all tokenizer variants, in both implementations, against HuggingFace.
 
+Usage (from the repo root):
+    python benchmarks/bench_tokenizers.py                     # quick run
+    python benchmarks/bench_tokenizers.py --samples 0 --merges 500   # full wikitext-2 train split
+
+Peak memory is tracemalloc, which only tracks Python allocations — for the
+fast (Rust) implementation it excludes Rust-side memory, so compare memory
+between reference rows only. Digests are md5 of the merge list, for checking
+that implementations produce identical output.
+"""
+
+import argparse
+import hashlib
+import sys
 import time
 import tracemalloc
+from pathlib import Path
 
-from complex_tokenization.examples.bne import train_bne_tokenizer
-from complex_tokenization.examples.boundless_bpe import train_boundless_bpe_tokenizer
-from complex_tokenization.examples.bpe import train_bpe_tokenizer, train_huggingface_tokenizer
-from complex_tokenization.examples.super_bpe import train_super_bpe_tokenizer
-from complex_tokenization.examples.utils import text_dataset
+sys.path.insert(0, str(Path(__file__).parent.parent))  # for tests.utils
+
+import complex_tokenization.tokenizer as reference
+from tests.utils import text_dataset, train_huggingface_tokenizer
+
+try:
+    import complex_tokenization_fast.tokenizer as fast
+except ImportError:
+    fast = None
 
 
-def bench(name, fn, *args, **kwargs):
+def bench(name, train):
     tracemalloc.start()
     start = time.perf_counter()
-    result = fn(*args, **kwargs)
+    merges = train()
     elapsed = time.perf_counter() - start
     _, peak_mem = tracemalloc.get_traced_memory()
     tracemalloc.stop()
-    print(f"{name:30s}  {elapsed:8.3f}s  {peak_mem / 1024 / 1024:8.2f} MB  merges={len(result)}")
-    return result, elapsed, peak_mem
+    digest = hashlib.md5(repr(list(merges)).encode()).hexdigest()[:10]
+    print(f"{name:30s}  {elapsed:8.3f}s  {peak_mem / 1024 / 1024:8.2f} MB  "
+          f"merges={len(merges):4d}  digest={digest}")
 
 
-def run_benchmarks(num_samples=10, num_merges=50):
-    print(f"\n{'='*70}")
-    print(f"Benchmark: {num_samples} samples, {num_merges} merges")
-    print(f"{'='*70}")
-    texts = list(text_dataset(max_samples=num_samples))
-    total_chars = sum(len(t) for t in texts)
-    print(f"Total text: {total_chars:,} characters\n")
-
-    print(f"{'Tokenizer':30s}  {'Time':>8s}  {'Peak Mem':>8s}     {'Merges':>6s}")
-    print("-" * 70)
-
-    bench("HuggingFace BPE", train_huggingface_tokenizer, texts, num_merges=num_merges)
-    bench("BPE (ours)", train_bpe_tokenizer, texts, num_merges=num_merges)
-    bench("BNE n=4 (ours)", train_bne_tokenizer, texts, n=4, num_merges=num_merges)
-    bench("Boundless BPE (ours)", train_boundless_bpe_tokenizer, texts, num_merges=num_merges)
-    bench("Super BPE (ours)", train_super_bpe_tokenizer, texts, num_merges=num_merges)
+def run_benchmarks(module, label, texts, num_merges):
+    print(f"\n[{label}]")
+    bench("BPE", lambda: module.BPETokenizer().train(texts, num_merges=num_merges))
+    bench("BNE n=4", lambda: module.BNETokenizer(n=4).train(texts, num_merges=num_merges))
+    bench("Boundless BPE", lambda: module.BoundlessBPETokenizer().train(texts, num_merges=num_merges))
+    bench("Super BPE", lambda: module.SuperBPETokenizer().train(texts, num_merges=num_merges))
 
 
 if __name__ == "__main__":
-    for samples in [10, 50]:
-        for merges in [50, 100]:
-            run_benchmarks(num_samples=samples, num_merges=merges)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--samples", type=int, default=50,
+                        help="dataset rows to use; 0 = the full wikitext-2 train split (~2M words)")
+    parser.add_argument("--merges", type=int, default=100)
+    args = parser.parse_args()
+
+    texts = [t for t in text_dataset(max_samples=args.samples or None) if t.strip()]
+    print(f"Corpus: {len(texts):,} documents, {sum(len(t) for t in texts):,} characters"
+          f" | {args.merges} merges")
+    print(f"{'Tokenizer':30s}  {'Time':>9s}  {'Peak Mem':>11s}")
+
+    bench("HuggingFace BPE", lambda: train_huggingface_tokenizer(texts, num_merges=args.merges))
+    run_benchmarks(reference, "reference (Python)", texts, args.merges)
+    if fast is not None:
+        run_benchmarks(fast, "fast (Rust)", texts, args.merges)
