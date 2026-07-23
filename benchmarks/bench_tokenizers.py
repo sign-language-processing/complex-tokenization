@@ -1,45 +1,106 @@
-"""Benchmark all tokenizer variants against each other and HuggingFace."""
+"""Benchmark all tokenizer variants, in both implementations, against HuggingFace.
 
+Usage (from the repo root):
+    python benchmarks/bench_tokenizers.py                     # quick run
+    python benchmarks/bench_tokenizers.py --samples 0 --merges 500   # full wikitext-2 train split
+
+Each case runs in its own subprocess so peak memory is the OS-level RSS
+high-water mark of that case alone (ru_maxrss covers Rust allocations too,
+unlike tracemalloc). Digests are md5 of the merge list, for checking that
+implementations produce identical output.
+"""
+
+import argparse
+import hashlib
+import resource
+import subprocess
+import sys
+import tempfile
 import time
-import tracemalloc
+from pathlib import Path
 
-from complex_tokenization.examples.bne import train_bne_tokenizer
-from complex_tokenization.examples.boundless_bpe import train_boundless_bpe_tokenizer
-from complex_tokenization.examples.bpe import train_bpe_tokenizer, train_huggingface_tokenizer
-from complex_tokenization.examples.super_bpe import train_super_bpe_tokenizer
-from complex_tokenization.examples.utils import text_dataset
+sys.path.insert(0, str(Path(__file__).parent.parent))  # for tests.utils
+
+CASES = ["BPE", "BNE n=4", "Boundless BPE", "Super BPE"]
+IMPLS = ["HuggingFace", "reference (Python)", "fast (Rust)"]
 
 
-def bench(name, fn, *args, **kwargs):
-    tracemalloc.start()
+def train(case, impl, texts, num_merges):
+    if impl == "HuggingFace":
+        from tests.utils import train_huggingface_tokenizer
+        return train_huggingface_tokenizer(texts, num_merges=num_merges)
+    if impl == "reference (Python)":
+        import complex_tokenization.tokenizer as module
+    else:
+        import complex_tokenization_fast.tokenizer as module
+    tokenizer = {
+        "BPE": module.BPETokenizer,
+        "BNE n=4": lambda: module.BNETokenizer(n=4),
+        "Boundless BPE": module.BoundlessBPETokenizer,
+        "Super BPE": module.SuperBPETokenizer,
+    }[case]()
+    return tokenizer.train(texts, num_merges=num_merges)
+
+
+def run_case(case, impl, texts_file, num_merges):
+    texts = Path(texts_file).read_text().split("\x00")
+
     start = time.perf_counter()
-    result = fn(*args, **kwargs)
+    merges = train(case, impl, texts, num_merges)
     elapsed = time.perf_counter() - start
-    _, peak_mem = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
-    print(f"{name:30s}  {elapsed:8.3f}s  {peak_mem / 1024 / 1024:8.2f} MB  merges={len(result)}")
-    return result, elapsed, peak_mem
 
-
-def run_benchmarks(num_samples=10, num_merges=50):
-    print(f"\n{'='*70}")
-    print(f"Benchmark: {num_samples} samples, {num_merges} merges")
-    print(f"{'='*70}")
-    texts = list(text_dataset(max_samples=num_samples))
-    total_chars = sum(len(t) for t in texts)
-    print(f"Total text: {total_chars:,} characters\n")
-
-    print(f"{'Tokenizer':30s}  {'Time':>8s}  {'Peak Mem':>8s}     {'Merges':>6s}")
-    print("-" * 70)
-
-    bench("HuggingFace BPE", train_huggingface_tokenizer, texts, num_merges=num_merges)
-    bench("BPE (ours)", train_bpe_tokenizer, texts, num_merges=num_merges)
-    bench("BNE n=4 (ours)", train_bne_tokenizer, texts, n=4, num_merges=num_merges)
-    bench("Boundless BPE (ours)", train_boundless_bpe_tokenizer, texts, num_merges=num_merges)
-    bench("Super BPE (ours)", train_super_bpe_tokenizer, texts, num_merges=num_merges)
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    peak_mb = peak / (1e6 if sys.platform == "darwin" else 1e3)  # bytes on macOS, KB on Linux
+    digest = hashlib.md5(repr(list(merges)).encode()).hexdigest()[:10]
+    print(f"| {case} | {impl} | {elapsed:.3f}s | {peak_mb:.0f} MB | {len(merges)} | `{digest}` |")
 
 
 if __name__ == "__main__":
-    for samples in [10, 50]:
-        for merges in [50, 100]:
-            run_benchmarks(num_samples=samples, num_merges=merges)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--samples", type=int, default=2000,
+                        help="dataset rows; the default keeps the whole run around 30s; 0 = full split (~2M words)")
+    parser.add_argument("--merges", type=int, default=100)
+    parser.add_argument("--case", choices=CASES, help=argparse.SUPPRESS)  # subprocess mode
+    parser.add_argument("--impl", choices=IMPLS, help=argparse.SUPPRESS)
+    parser.add_argument("--texts-file", help=argparse.SUPPRESS)
+    args = parser.parse_args()
+
+    if args.case:
+        run_case(args.case, args.impl, args.texts_file, args.merges)
+        sys.exit(0)
+
+    try:
+        import complex_tokenization_fast  # noqa: F401
+        impls = IMPLS
+    except ImportError:
+        impls = IMPLS[:-1]
+
+    # Load the corpus once and hand it to subprocesses through a file:
+    # importing datasets and streaming rows costs seconds per subprocess.
+    from tests.utils import text_dataset
+    texts = [t for t in text_dataset(max_samples=args.samples or None) if t.strip()]
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
+        f.write("\x00".join(texts))
+        texts_file = f.name
+
+    rows = []
+    try:
+        for impl in impls:
+            for case in CASES if impl != "HuggingFace" else ["BPE"]:
+                result = subprocess.run(
+                    [sys.executable, __file__, "--case", case, "--impl", impl,
+                     "--texts-file", texts_file, "--merges", str(args.merges)],
+                    capture_output=True, text=True, cwd=Path(__file__).parent.parent,
+                )
+                row = [line for line in result.stdout.splitlines() if line.startswith("|")]
+                rows.extend(row or [f"| {case} | {impl} | failed | | | see stderr |"])
+                if not row:
+                    print(result.stderr, file=sys.stderr)
+    finally:
+        Path(texts_file).unlink()
+
+    print(f"Corpus: {len(texts):,} documents, {sum(len(t) for t in texts):,} characters"
+          f" | {args.merges} merges\n")
+    print("| Tokenizer | Implementation | Time | Peak RSS | Merges | Digest |")
+    print("|---|---|--:|--:|--:|---|")
+    print("\n".join(rows))
