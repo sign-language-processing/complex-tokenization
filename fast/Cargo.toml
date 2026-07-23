@@ -14,3 +14,5 @@ unicode-segmentation = "1.12"
 regex = "1"
 rayon = "1"
 rustc-hash = "2"
+# For the vendored gigatoken O200k pretokenizer (see src/pretok/).
+icu_properties = { version = "2", features = ["compiled_data"] }
