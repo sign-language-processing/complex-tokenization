@@ -53,10 +53,13 @@ class Tokenizer:
         graphs = self._build_graphs(texts)
         trainer = Trainer(graphs=graphs)
 
-        for merge_strs in self.merges:
-            nodes = tuple(Node(value=s.encode("utf-8")) for s in merge_strs)
-            token = reduce(lambda a, b: a + b, nodes)
-            trainer.apply_merge(token, nodes)
+        if self.merges:
+            merge_list = []
+            for merge_strs in self.merges:
+                nodes = tuple(Node(value=s.encode("utf-8")) for s in merge_strs)
+                token = reduce(lambda a, b: a + b, nodes)
+                merge_list.append((token, nodes))
+            trainer.apply_merges(merge_list)
 
         return trainer
 
@@ -75,10 +78,13 @@ class Tokenizer:
         trainer = Trainer(graph=Node(value=b""))
         trainer.set_streaming(doc_words, connected=self.connected)
 
-        for merge_strs in self.merges:
-            nodes = tuple(Node(value=s.encode("utf-8")) for s in merge_strs)
-            token = reduce(lambda a, b: a + b, nodes)
-            trainer.apply_merge(token, nodes)
+        if self.merges:
+            merge_list = []
+            for merge_strs in self.merges:
+                nodes = tuple(Node(value=s.encode("utf-8")) for s in merge_strs)
+                token = reduce(lambda a, b: a + b, nodes)
+                merge_list.append((token, nodes))
+            trainer.apply_merges(merge_list)
 
         return trainer
 
