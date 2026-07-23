@@ -4,6 +4,9 @@ from complex_tokenization_fast._rs import sync_settings
 class _GraphSettingsMeta(type):
     _MAX_MERGE_SIZE = 2
     _ONLY_MINIMAL_MERGES = True
+    # Reference-implementation knob (gates its get_merges memoization); the
+    # fast implementation has no equivalent cache, so it only round-trips.
+    TRADE_MEMORY_FOR_SPEED = True
 
     @property
     def MAX_MERGE_SIZE(cls):  # noqa: N802

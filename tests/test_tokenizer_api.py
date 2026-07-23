@@ -91,3 +91,20 @@ class TestTokenizerAPI:
         default_merges = BPETokenizer().train(texts, num_merges=5)
         whitespace_merges = BPETokenizer(pretokenizer=Whitespace()).train(texts, num_merges=5)
         assert default_merges != whitespace_merges
+
+    @pytest.mark.parametrize("tokenizer_cls", [
+        BPETokenizer,
+        lambda: BNETokenizer(n=4),
+        BoundlessBPETokenizer,
+        SuperBPETokenizer,
+    ])
+    def test_repeated_training_gives_identical_merges(self, tokenizer_cls):
+        # Training must not observably mutate process-global state: a second
+        # train in the same process must reproduce the first. The corpus has
+        # multi-byte characters (é, à) whose UTF-8 byte pairs get merged
+        # within the first few merges — a cached cluster graph mutated by the
+        # first train would change what the second train sees.
+        texts = ["café déjà café déjà café déjà"]
+        first = tokenizer_cls().train(texts, num_merges=4)
+        second = tokenizer_cls().train(texts, num_merges=4)
+        assert first == second
