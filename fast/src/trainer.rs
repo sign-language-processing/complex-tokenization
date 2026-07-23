@@ -5,7 +5,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
 
 use crate::graph::{graphv_to_pyobject, pyobject_to_graphv, GraphV};
-use crate::units::{apply_merge_to_cluster_cache, replace_word_cache, snapshot_word_cache};
+use crate::units::{replace_word_cache, snapshot_word_cache};
 use std::collections::HashMap;
 
 // Merge score: merging a k-tuple with `count` occurrences removes (k-1)*count nodes.
@@ -430,9 +430,6 @@ fn train_unconn(
         num_merges,
         verbose,
         true,
-        &mut |token, nodes| {
-            apply_merge_to_cluster_cache(token, nodes);
-        },
     );
 
     for (entry, member_idxs) in entries.iter().zip(&members) {
@@ -462,7 +459,6 @@ fn train_single(
             println!("Merging {:?} count={}", nodes, counts[&nodes]);
         }
         *graph = graph.merge(&token, &nodes);
-        apply_merge_to_cluster_cache(&token, &nodes);
         pending.push((token, nodes));
     }
     pending
@@ -846,7 +842,6 @@ fn build_candidate_index(entries: &[WordEntry]) -> Vec<FxHashMap<Vec<GraphV>, Fx
 // Persistent global counts + inverted index with delta updates. Per merge step
 // only the entries containing the chosen candidate are touched, and `global` is
 // patched by diffing each entry's old vs new candidates instead of being rebuilt.
-// `on_merge` fires once per merge in order (used for cluster-cache side effects).
 // `use_try` selects try_merge semantics (legacy Unconn path) over merge; with
 // try_merge a no-op leaves the entry and counts untouched.
 fn train_entries_delta(
@@ -856,7 +851,6 @@ fn train_entries_delta(
     num_merges: usize,
     verbose: bool,
     use_try: bool,
-    on_merge: &mut dyn FnMut(&GraphV, &[GraphV]),
 ) -> Vec<(GraphV, Vec<GraphV>)> {
     let mut pending = Vec::new();
     let mut global = build_global_counts(entries);
@@ -1043,7 +1037,6 @@ fn train_entries_delta(
                     }
                 }
             });
-        on_merge(&token, &nodes);
         pending.push((token, nodes));
     }
     pending
@@ -1056,7 +1049,7 @@ fn train_streaming_disconnected(
     num_merges: usize,
     verbose: bool,
 ) -> Vec<(GraphV, Vec<GraphV>)> {
-    train_entries_delta(entries, None, range_start, num_merges, verbose, false, &mut |_, _| {})
+    train_entries_delta(entries, None, range_start, num_merges, verbose, false)
 }
 
 // Connected: must assemble doc graphs for cross-word pairs
@@ -1406,7 +1399,6 @@ impl Trainer {
                     };
                     let token = make_token(&nodes);
                     apply_merge_parallel(subs, &mut active, &token, &nodes);
-                    apply_merge_to_cluster_cache(&token, &nodes);
                     pending.push((token, nodes));
 
                     let merge_num = i + 1;
@@ -1426,7 +1418,6 @@ impl Trainer {
                     };
                     let token = make_token(&nodes);
                     *graph = graph.merge(&token, &nodes);
-                    apply_merge_to_cluster_cache(&token, &nodes);
                     pending.push((token, nodes));
 
                     let merge_num = i + 1;

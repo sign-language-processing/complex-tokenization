@@ -18,11 +18,11 @@ To verify:
 pip install -e . && pytest tests/
 
 # Test fast (from fast/ directory)
-cd fast && maturin develop --release && pytest ../tests/
+cd fast && maturin develop --release && pytest ../tests/ -p conftest
 ```
 
 ## Testing
 
 - Reference tests run from the repo root: `pytest tests/`
-- Fast tests run from `fast/`: `pytest ../tests/` (the `fast/conftest.py` aliases `complex_tokenization` → `complex_tokenization_fast`)
+- Fast tests run from `fast/`: `pytest ../tests/ -p conftest` — the `-p conftest` is REQUIRED: it loads `fast/conftest.py`, which aliases `complex_tokenization` → `complex_tokenization_fast`. Without it, pytest 9 never loads that conftest (it is outside the tests/ subtree) and the run silently tests the reference implementation instead of fast
 - Both must pass the same 127+ tests

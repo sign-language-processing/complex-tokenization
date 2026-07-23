@@ -52,15 +52,6 @@ pub fn clear_handlers() {
     CLUSTER_CACHE.lock().unwrap().clear();
 }
 
-pub fn apply_merge_to_cluster_cache(token: &GraphV, merge: &[GraphV]) {
-    let mut cache = CLUSTER_CACHE.lock().unwrap();
-    for graph in cache.values_mut() {
-        if let Some(new_g) = graph.try_merge(token, merge) {
-            *graph = new_g;
-        }
-    }
-}
-
 static WORD_CACHE: LazyLock<Mutex<HashMap<String, GraphV>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
