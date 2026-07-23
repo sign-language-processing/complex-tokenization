@@ -57,8 +57,8 @@ def run_case(case, impl, samples, num_merges):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--samples", type=int, default=50,
-                        help="dataset rows to use; 0 = the full wikitext-2 train split (~2M words)")
+    parser.add_argument("--samples", type=int, default=3500,
+                        help="dataset rows; default keeps every Python case under ~10s; 0 = full split (~2M words)")
     parser.add_argument("--merges", type=int, default=100)
     parser.add_argument("--case", choices=CASES, help=argparse.SUPPRESS)  # subprocess mode
     parser.add_argument("--impl", choices=IMPLS, help=argparse.SUPPRESS)
