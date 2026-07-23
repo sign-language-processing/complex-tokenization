@@ -1,6 +1,6 @@
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -291,6 +291,96 @@ fn seq_emit_merges(nodes: &[GraphV], emit: &mut dyn FnMut(Vec<GraphV>)) {
             }
         }
     }
+}
+
+/// First candidate in emit/traversal order that is a member of `wanted`,
+/// short-circuiting the walk. Mirrors `emit_merges` ordering exactly, so it
+/// yields the same winner the reference's stable `max`/`next` tie-break would,
+/// without materializing the whole candidate stream.
+pub fn first_merge_in(g: &GraphV, wanted: &FxHashSet<Vec<GraphV>>) -> Option<Vec<GraphV>> {
+    match g {
+        GraphV::Node(_) => None,
+        GraphV::Seq(nodes) => seq_first_merge_in(nodes, wanted),
+        GraphV::Tree { root, children } => tree_first_merge_in(root, children, wanted),
+        GraphV::FullConn(nodes) => fullconn_first_merge_in(nodes, wanted),
+        GraphV::Unconn(subs) => subs.iter().find_map(|sg| first_merge_in(sg, wanted)),
+    }
+}
+
+fn seq_first_merge_in(nodes: &[GraphV], wanted: &FxHashSet<Vec<GraphV>>) -> Option<Vec<GraphV>> {
+    let num_nodes = nodes.len();
+    let only_minimal = ONLY_MINIMAL_MERGES.load(Ordering::Relaxed);
+    let max_size = MAX_MERGE_SIZE.load(Ordering::Relaxed);
+
+    if only_minimal && max_size == 2 && nodes.iter().all(|n| n.is_node()) {
+        for i in 0..num_nodes.saturating_sub(1) {
+            let m = vec![nodes[i].clone(), nodes[i + 1].clone()];
+            if wanted.contains(&m) {
+                return Some(m);
+            }
+        }
+        return None;
+    }
+
+    for i in 0..num_nodes {
+        if !nodes[i].is_node() {
+            if let Some(w) = first_merge_in(&nodes[i], wanted) {
+                return Some(w);
+            }
+        }
+        if only_minimal && !nodes[i].is_node() {
+            continue;
+        }
+        let end = std::cmp::min(i + max_size + 1, num_nodes + 1);
+        for j in (i + 2)..end {
+            if only_minimal && !nodes[j - 1].is_node() {
+                break;
+            }
+            let m = if j - i == 2 {
+                vec![nodes[i].clone(), nodes[j - 1].clone()]
+            } else {
+                nodes[i..j].to_vec()
+            };
+            if wanted.contains(&m) {
+                return Some(m);
+            }
+        }
+    }
+    None
+}
+
+fn tree_first_merge_in(root: &GraphV, children: &[GraphV], wanted: &FxHashSet<Vec<GraphV>>) -> Option<Vec<GraphV>> {
+    if let Some(w) = first_merge_in(root, wanted) {
+        return Some(w);
+    }
+    let only_minimal = ONLY_MINIMAL_MERGES.load(Ordering::Relaxed);
+    if !only_minimal || (root.is_node() && children.iter().all(|c| c.is_node())) {
+        let mut full_merge = vec![root.clone()];
+        full_merge.extend(children.iter().cloned());
+        if wanted.contains(&full_merge) {
+            return Some(full_merge);
+        }
+    }
+    children.iter().find_map(|c| first_merge_in(c, wanted))
+}
+
+fn fullconn_first_merge_in(nodes: &[GraphV], wanted: &FxHashSet<Vec<GraphV>>) -> Option<Vec<GraphV>> {
+    for node in nodes {
+        if let Some(w) = first_merge_in(node, wanted) {
+            return Some(w);
+        }
+    }
+    for i in 0..nodes.len() {
+        for j in 0..nodes.len() {
+            if i != j {
+                let m = vec![nodes[i].clone(), nodes[j].clone()];
+                if wanted.contains(&m) {
+                    return Some(m);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Weighted recount for a top-level Seq. Within-child candidates are counted
@@ -953,7 +1043,10 @@ fn seq_try_merge(nodes: &[GraphV], token: &GraphV, merge: &[GraphV], memo: &mut 
 
     let has_complex_child = nodes.iter().any(|n| !matches!(n, GraphV::Node(_)));
 
-    let has_match = if n < m || (!has_complex_child && only_minimal) {
+    // n-ary (m > 2) minimal merges over all-Node runs are real candidates
+    // (see seq_emit_merges), so scan for them too — mirrors seq_merge, which
+    // has no such short-circuit.
+    let has_match = if n < m {
         false
     } else {
         let mut found = false;

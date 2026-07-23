@@ -1,39 +1,106 @@
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
 
 use crate::graph::{graphv_to_pyobject, pyobject_to_graphv, GraphV};
 use crate::units::{apply_merge_to_cluster_cache, replace_word_cache, snapshot_word_cache};
 use std::collections::HashMap;
 
-/// Pick the merge with the highest score: (len - 1) * count.
-/// Ties broken by bytes (deterministic, order-independent).
-fn pick_best(map: &FxHashMap<Vec<GraphV>, usize>) -> Option<(Vec<GraphV>, usize)> {
-    let mut best: Option<(&Vec<GraphV>, usize, Vec<Vec<u8>>)> = None;
-    for (key, &count) in map {
-        let score = (key.len() - 1) * count;
-        if score == 0 {
+// Merge score: merging a k-tuple with `count` occurrences removes (k-1)*count nodes.
+fn merge_score(nodes: &[GraphV], count: usize) -> usize {
+    (nodes.len() - 1) * count
+}
+
+/// One pass over `map`: returns a representative max-score candidate, whether
+/// the max score is shared by more than one candidate (a tie), and that score.
+/// None when every candidate scores 0. The common no-tie path avoids allocating
+/// a tie set — only ties pay for `tied_at`.
+fn best_and_tie(map: &FxHashMap<Vec<GraphV>, usize>) -> Option<(&Vec<GraphV>, bool, usize)> {
+    let mut best_score = 0;
+    let mut best_key: Option<&Vec<GraphV>> = None;
+    let mut tie = false;
+    for (k, &c) in map {
+        let s = merge_score(k, c);
+        if s == 0 {
             continue;
         }
-        let dominated = match &best {
-            Some((_, bs, _)) => score < *bs,
-            None => false,
-        };
-        if dominated {
-            continue;
-        }
-        let bytes_key: Vec<Vec<u8>> = key.iter().map(|g| g.to_bytes()).collect();
-        let replace = match &best {
-            None => true,
-            Some((_, bs, bb)) => score > *bs || (score == *bs && bytes_key > *bb),
-        };
-        if replace {
-            best = Some((key, score, bytes_key));
+        if s > best_score {
+            best_score = s;
+            best_key = Some(k);
+            tie = false;
+        } else if s == best_score {
+            tie = true;
         }
     }
-    best.map(|(k, _, _)| (k.clone(), map[k]))
+    best_key.map(|k| (k, tie, best_score))
+}
+
+/// Candidates whose score equals `score`.
+fn tied_at(map: &FxHashMap<Vec<GraphV>, usize>, score: usize) -> FxHashSet<Vec<GraphV>> {
+    map.iter()
+        .filter(|(k, &c)| merge_score(k, c) == score)
+        .map(|(k, _)| k.clone())
+        .collect()
+}
+
+/// First candidate of `graph` in emit (traversal) order that is in `ties`.
+/// Mirrors the reference tie-break: among equal-max-score candidates, take the
+/// one encountered first while walking the graph (== HuggingFace merge order).
+fn first_in_ties(graph: &GraphV, ties: &FxHashSet<Vec<GraphV>>) -> Option<Vec<GraphV>> {
+    crate::graph::first_merge_in(graph, ties)
+}
+
+/// Pick the best merge from `map`, breaking ties by first emit-order appearance
+/// while scanning `graphs` in order (the reference's traversal order).
+fn pick_best_by_scan<'a>(
+    map: &FxHashMap<Vec<GraphV>, usize>,
+    graphs: impl Iterator<Item = &'a GraphV>,
+) -> Option<Vec<GraphV>> {
+    let (best_key, tie, best) = best_and_tie(map)?;
+    if !tie {
+        return Some(best_key.clone());
+    }
+    let ties = tied_at(map, best);
+    let mut graphs = graphs;
+    graphs.find_map(|g| first_in_ties(g, &ties))
+}
+
+/// Tie-break for the connected streaming path: scan documents in order, each
+/// assembled on the fly, and take the first tied candidate.
+fn pick_best_docs(
+    map: &FxHashMap<Vec<GraphV>, usize>,
+    doc_words: &[Vec<String>],
+    cache: &HashMap<String, GraphV>,
+) -> Option<Vec<GraphV>> {
+    let (best_key, tie, best) = best_and_tie(map)?;
+    if !tie {
+        return Some(best_key.clone());
+    }
+    let ties = tied_at(map, best);
+    doc_words
+        .iter()
+        .find_map(|words| first_in_ties(&build_doc_graph(words, cache, true), &ties))
+}
+
+/// Tie-break over unique entries in first-occurrence order, using the inverted
+/// index to jump straight to the earliest entry holding a tied candidate.
+fn pick_best_entries(
+    global: &FxHashMap<Vec<GraphV>, usize>,
+    entries: &[WordEntry],
+    index: &FxHashMap<Vec<GraphV>, Vec<u32>>,
+) -> Option<Vec<GraphV>> {
+    let (best_key, tie, best) = best_and_tie(global)?;
+    if !tie {
+        return Some(best_key.clone());
+    }
+    let ties = tied_at(global, best);
+    let mi = ties
+        .iter()
+        .filter_map(|c| index.get(c).and_then(|v| v.iter().min()).copied())
+        .min()?;
+    first_in_ties(&entries[mi as usize].graph, &ties)
 }
 
 fn make_token(nodes: &[GraphV]) -> GraphV {
@@ -204,12 +271,12 @@ fn train_single(
     for _ in range_start..num_merges {
         let mut counts: FxHashMap<Vec<GraphV>, usize> = FxHashMap::default();
         graph.emit_merges(&mut |m| *counts.entry(m).or_insert(0) += 1);
-        let Some((nodes, count)) = pick_best(&counts) else {
+        let Some(nodes) = pick_best_by_scan(&counts, std::iter::once(&*graph)) else {
             break;
         };
         let token = make_token(&nodes);
         if verbose {
-            println!("Merging {:?} count={}", nodes, count);
+            println!("Merging {:?} count={}", nodes, counts[&nodes]);
         }
         *graph = graph.merge(&token, &nodes);
         apply_merge_to_cluster_cache(&token, &nodes);
@@ -270,17 +337,24 @@ fn build_word_entries(
     doc_words: &[Vec<String>],
     cache: &HashMap<String, GraphV>,
 ) -> Vec<WordEntry> {
-    let mut freq_map: FxHashMap<String, usize> = FxHashMap::default();
+    // First-occurrence order (like the reference's dict.fromkeys) so the
+    // tie-break scan over entries matches traversal order.
+    let mut order: Vec<&str> = Vec::new();
+    let mut freq_map: FxHashMap<&str, usize> = FxHashMap::default();
     for words in doc_words {
         for w in words {
-            *freq_map.entry(w.clone()).or_insert(0) += 1;
+            match freq_map.get_mut(w.as_str()) {
+                Some(f) => *f += 1,
+                None => {
+                    freq_map.insert(w.as_str(), 1);
+                    order.push(w.as_str());
+                }
+            }
         }
     }
-    freq_map
+    order
         .into_iter()
-        .filter_map(|(w, freq)| {
-            cache.get(w.as_str()).map(|g| WordEntry::new(g.clone(), freq))
-        })
+        .filter_map(|w| cache.get(w).map(|g| WordEntry::new(g.clone(), freq_map[w])))
         .collect()
 }
 
@@ -358,12 +432,12 @@ fn train_entries_delta(
     let mut index = build_candidate_index(entries);
 
     for _ in range_start..num_merges {
-        let Some((nodes, count)) = pick_best(&global) else {
+        let Some(nodes) = pick_best_entries(&global, entries, &index) else {
             break;
         };
         let token = make_token(&nodes);
         if verbose {
-            println!("Merging {:?} count={}", nodes, count);
+            println!("Merging {:?} count={}", nodes, global[&nodes]);
         }
 
         let affected: Vec<u32> = index.get(&nodes).cloned().unwrap_or_default();
@@ -463,12 +537,12 @@ fn train_streaming_connected(
             }
         }
 
-        let Some((nodes, count)) = pick_best(&global) else {
+        let Some(nodes) = pick_best_docs(&global, doc_words, cache) else {
             break;
         };
         let token = make_token(&nodes);
         if verbose {
-            println!("Merging {:?} count={}", nodes, count);
+            println!("Merging {:?} count={}", nodes, global[&nodes]);
         }
 
         for graph in cache.values_mut() {
@@ -538,7 +612,7 @@ fn train_streaming_with_counts(
 
         for i in range_start..num_merges {
             let global = build_global_counts(&entries);
-            let Some((nodes, _)) = pick_best(&global) else { break };
+            let Some(nodes) = pick_best_by_scan(&global, entries.iter().map(|e| &e.graph)) else { break };
             let token = make_token(&nodes);
 
             entries.par_iter_mut().for_each(|entry| {
@@ -606,7 +680,7 @@ fn train_streaming_with_counts(
             }
         }
 
-        let Some((nodes, _)) = pick_best(&global) else { break };
+        let Some(nodes) = pick_best_docs(&global, doc_words, &cache) else { break };
         let token = make_token(&nodes);
 
         for graph in cache.values_mut() {
@@ -757,7 +831,10 @@ impl Trainer {
 
                 for i in range_start..num_merges {
                     count_merges_into(subs, &active, &mut counts);
-                    let Some((nodes, _)) = pick_best(&counts) else {
+                    let Some(nodes) = pick_best_by_scan(
+                        &counts,
+                        subs.iter().zip(active.iter()).filter(|(_, &a)| a).map(|(g, _)| g),
+                    ) else {
                         break;
                     };
                     let token = make_token(&nodes);
@@ -777,7 +854,7 @@ impl Trainer {
                 for i in range_start..num_merges {
                     counts.clear();
                     graph.emit_merges(&mut |m| *counts.entry(m).or_insert(0) += 1);
-                    let Some((nodes, _)) = pick_best(&counts) else {
+                    let Some(nodes) = pick_best_by_scan(&counts, std::iter::once(&*graph)) else {
                         break;
                     };
                     let token = make_token(&nodes);
