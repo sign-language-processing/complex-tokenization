@@ -1,6 +1,6 @@
 from functools import lru_cache, reduce
 
-from complex_tokenization_fast._rs import Node, Trainer
+from complex_tokenization_fast._rs import Node, Trainer, str_to_bytes
 from complex_tokenization_fast.graphs.settings import GraphSettings
 from complex_tokenization_fast.graphs.units import characters, register_script, utf8, utf8_clusters
 from complex_tokenization_fast.graphs.words import GPTPretokenizer, words
@@ -56,7 +56,7 @@ class Tokenizer:
         if self.merges:
             merge_list = []
             for merge_strs in self.merges:
-                nodes = tuple(Node(value=s.encode("utf-8")) for s in merge_strs)
+                nodes = tuple(Node(value=str_to_bytes(s)) for s in merge_strs)
                 token = reduce(lambda a, b: a + b, nodes)
                 merge_list.append((token, nodes))
             trainer.apply_merges(merge_list)
@@ -81,7 +81,7 @@ class Tokenizer:
         if self.merges:
             merge_list = []
             for merge_strs in self.merges:
-                nodes = tuple(Node(value=s.encode("utf-8")) for s in merge_strs)
+                nodes = tuple(Node(value=str_to_bytes(s)) for s in merge_strs)
                 token = reduce(lambda a, b: a + b, nodes)
                 merge_list.append((token, nodes))
             trainer.apply_merges(merge_list)
