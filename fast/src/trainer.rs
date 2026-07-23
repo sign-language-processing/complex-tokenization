@@ -143,6 +143,17 @@ fn train_unconn(
         }
     }
 
+    // A connected doc is one giant Seq whose children are word subgraphs, many
+    // duplicated. Share equal children by Arc pointer so the merge memo hits and
+    // the weighted recount can dedup; small word entries stay unweighted.
+    for entry in entries.iter_mut() {
+        if let Some(canon) = canonicalize_seq(&entry.graph) {
+            entry.graph = canon;
+            entry.weighted = true;
+            entry.recount();
+        }
+    }
+
     let pending = train_entries_delta(&mut entries, range_start, num_merges, verbose, true, &mut |token, nodes| {
         apply_merge_to_cluster_cache(token, nodes);
     });
@@ -153,6 +164,33 @@ fn train_unconn(
         }
     }
     pending
+}
+
+// Rewrite a Seq so equal non-Node children share one Arc. Returns None if there
+// were no duplicates (nothing to gain). Leaf Node children are cheap and carry
+// no Arc identity, so they are left as-is.
+fn canonicalize_seq(g: &GraphV) -> Option<GraphV> {
+    let GraphV::Seq(nodes) = g else { return None };
+    let mut canon: FxHashMap<GraphV, GraphV> = FxHashMap::default();
+    let mut new_nodes: Vec<GraphV> = Vec::with_capacity(nodes.len());
+    let mut dup = false;
+    for n in nodes.iter() {
+        if matches!(n, GraphV::Node(_)) {
+            new_nodes.push(n.clone());
+            continue;
+        }
+        match canon.get(n) {
+            Some(shared) => {
+                dup = true;
+                new_nodes.push(shared.clone());
+            }
+            None => {
+                canon.insert(n.clone(), n.clone());
+                new_nodes.push(n.clone());
+            }
+        }
+    }
+    if dup { Some(GraphV::new_seq(new_nodes)) } else { None }
 }
 
 fn train_single(
@@ -186,17 +224,25 @@ struct WordEntry {
     graph: GraphV,
     candidates: FxHashMap<Vec<GraphV>, usize>,
     freq: usize,
+    // Connected giant Seq: recount via pointer-weighted dedup of shared children.
+    weighted: bool,
 }
 
 impl WordEntry {
     fn new(graph: GraphV, freq: usize) -> Self {
-        let mut candidates = FxHashMap::default();
-        graph.emit_merges(&mut |m| *candidates.entry(m).or_insert(0) += 1);
-        WordEntry { graph, candidates, freq }
+        let mut entry = WordEntry { graph, candidates: FxHashMap::default(), freq, weighted: false };
+        entry.recount();
+        entry
     }
 
     fn recount(&mut self) {
         self.candidates.clear();
+        if self.weighted {
+            if let GraphV::Seq(nodes) = &self.graph {
+                crate::graph::seq_recount(nodes, &mut self.candidates);
+                return;
+            }
+        }
         self.graph.emit_merges(&mut |m| *self.candidates.entry(m).or_insert(0) += 1);
     }
 
