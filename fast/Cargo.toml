@@ -14,3 +14,6 @@ unicode-segmentation = "1.12"
 regex = "1"
 rayon = "1"
 rustc-hash = "2"
+# Rust-side pretokenization for the default-config batch ingestion — the same
+# crate the Python `tokenizers` package wraps, so splits are identical.
+tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
