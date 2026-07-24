@@ -749,11 +749,25 @@ impl WordEntry {
         if n < 2 {
             return None;
         }
+        // Doc-top matches (two adjacent Node children equal to the pair) are
+        // handled incrementally too: greedy left-to-right non-overlapping,
+        // exactly like seq_try_merge. Only the rare full-collapse case falls
+        // back to the rebuild path.
         let (m0, m1) = (&merge[0], &merge[1]);
-        for i in 0..n - 1 {
-            if nodes[i] == *m0 && nodes[i + 1] == *m1 {
-                return None;
+        let mut matches: Vec<usize> = Vec::new();
+        {
+            let mut i = 0;
+            while i + 1 < n {
+                if nodes[i] == *m0 && nodes[i + 1] == *m1 {
+                    matches.push(i);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
             }
+        }
+        if n - matches.len() < 2 {
+            return None;
         }
 
         // Walk children through an entry-local memo. Children are Arc-shared
@@ -816,7 +830,7 @@ impl WordEntry {
             }
         }
 
-        if replacements.is_empty() {
+        if replacements.is_empty() && matches.is_empty() {
             return Some(ApplyOutcome::Unchanged);
         }
 
@@ -836,12 +850,13 @@ impl WordEntry {
             new_c.emit_merges(&mut |m| *delta.entry(interner.key(&m)).or_insert(0) += 1);
         }
 
-        // Boundary pairs: only pair positions touching a changed child can
-        // differ. seq_recount emits pair (i, i+1) iff both children are leaf
-        // Nodes (minimal pair mode).
+        // Boundary pairs: only pair positions touching a changed child or a
+        // consumed match can differ. seq_recount emits pair (i, i+1) iff both
+        // children are leaf Nodes (minimal pair mode). Untouched adjacent runs
+        // keep their pairs on both sides, so they cancel by not being counted.
         let repl_at: FxHashMap<usize, &GraphV> =
             replacements.iter().map(|(i, g)| (*i, g)).collect();
-        let new_at = |x: usize| -> &GraphV { repl_at.get(&x).copied().unwrap_or(&nodes[x]) };
+        // Old-side affected pair starts.
         let mut starts: FxHashSet<usize> = FxHashSet::default();
         for &(c, _) in &replacements {
             if c > 0 {
@@ -851,16 +866,82 @@ impl WordEntry {
                 starts.insert(c);
             }
         }
+        for &i in &matches {
+            if i > 0 {
+                starts.insert(i - 1);
+            }
+            starts.insert(i);
+            if i + 2 < n {
+                starts.insert(i + 1);
+            }
+        }
         for &p in &starts {
             if nodes[p].is_node() && nodes[p + 1].is_node() {
                 *delta
                     .entry(pair_key(&nodes[p], &nodes[p + 1], interner))
                     .or_insert(0) -= 1;
             }
-            let (np, nq) = (new_at(p), new_at(p + 1));
-            if np.is_node() && nq.is_node() {
-                *delta.entry(pair_key(np, nq, interner)).or_insert(0) += 1;
+        }
+
+        // New side: without matches, positions are stable — overlay lookup.
+        // With matches, build the new children once and read the affected new
+        // positions off it.
+        let mut rebuilt_children: Option<Vec<GraphV>> = None;
+        if matches.is_empty() {
+            let new_at = |x: usize| -> &GraphV { repl_at.get(&x).copied().unwrap_or(&nodes[x]) };
+            let mut new_starts: FxHashSet<usize> = FxHashSet::default();
+            for &(c, _) in &replacements {
+                if c > 0 {
+                    new_starts.insert(c - 1);
+                }
+                if c + 1 < n {
+                    new_starts.insert(c);
+                }
             }
+            for &p in &new_starts {
+                let (np, nq) = (new_at(p), new_at(p + 1));
+                if np.is_node() && nq.is_node() {
+                    *delta.entry(pair_key(np, nq, interner)).or_insert(0) += 1;
+                }
+            }
+        } else {
+            let mut new_children: Vec<GraphV> = Vec::with_capacity(n - matches.len());
+            let mut new_affected: Vec<usize> = Vec::new();
+            let mut mi = 0;
+            let mut i = 0;
+            while i < n {
+                if mi < matches.len() && matches[mi] == i {
+                    new_affected.push(new_children.len());
+                    new_children.push(token.clone());
+                    i += 2;
+                    mi += 1;
+                } else {
+                    if let Some(r) = repl_at.get(&i) {
+                        new_affected.push(new_children.len());
+                        new_children.push((*r).clone());
+                    } else {
+                        new_children.push(nodes[i].clone());
+                    }
+                    i += 1;
+                }
+            }
+            let nn = new_children.len();
+            let mut new_starts: FxHashSet<usize> = FxHashSet::default();
+            for &a in &new_affected {
+                if a > 0 {
+                    new_starts.insert(a - 1);
+                }
+                if a + 1 < nn {
+                    new_starts.insert(a);
+                }
+            }
+            for &q in &new_starts {
+                let (np, nq) = (&new_children[q], &new_children[q + 1]);
+                if np.is_node() && nq.is_node() {
+                    *delta.entry(pair_key(np, nq, interner)).or_insert(0) += 1;
+                }
+            }
+            rebuilt_children = Some(new_children);
         }
 
         let freq = self.freq;
@@ -891,13 +972,18 @@ impl WordEntry {
             }
         }
 
-        // The scan borrows are done; write the replacements in place. Entry
-        // graphs are uniquely owned after canonicalization, so make_mut does
-        // not clone.
-        let GraphV::Seq(nodes_arc) = &mut self.graph else { unreachable!() };
-        let nodes_mut = Arc::make_mut(nodes_arc);
-        for (i, new_child) in replacements {
-            nodes_mut[i] = new_child;
+        // The scan borrows are done. Without matches, write the replacements
+        // in place (entry graphs are uniquely owned after canonicalization, so
+        // make_mut does not clone); with matches the children shifted, so swap
+        // in the rebuilt Vec.
+        if let Some(new_children) = rebuilt_children {
+            self.graph = GraphV::new_seq(new_children);
+        } else {
+            let GraphV::Seq(nodes_arc) = &mut self.graph else { unreachable!() };
+            let nodes_mut = Arc::make_mut(nodes_arc);
+            for (i, new_child) in replacements {
+                nodes_mut[i] = new_child;
+            }
         }
         Some(ApplyOutcome::Delta(ops))
     }
