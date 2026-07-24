@@ -52,6 +52,21 @@ pub fn clear_handlers() {
     CLUSTER_CACHE.lock().unwrap().clear();
 }
 
+pub(crate) fn snapshot_cluster_cache() -> HashMap<String, GraphV> {
+    CLUSTER_CACHE.lock().unwrap().clone()
+}
+
+pub(crate) fn extend_cluster_cache(new_entries: Vec<(String, GraphV)>) {
+    let mut cache = CLUSTER_CACHE.lock().unwrap();
+    for (k, v) in new_entries {
+        cache.entry(k).or_insert(v);
+    }
+}
+
+pub(crate) fn has_cluster_handlers() -> bool {
+    !CLUSTER_HANDLERS.lock().unwrap().is_empty()
+}
+
 static WORD_CACHE: LazyLock<Mutex<HashMap<String, GraphV>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
