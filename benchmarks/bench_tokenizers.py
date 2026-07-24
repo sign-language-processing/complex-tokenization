@@ -60,6 +60,10 @@ if __name__ == "__main__":
     parser.add_argument("--samples", type=int, default=2000,
                         help="dataset rows; the default keeps the whole run around 30s; 0 = full split (~2M words)")
     parser.add_argument("--merges", type=int, default=100)
+    parser.add_argument("--dataset-config", default="wikitext-2-raw-v1",
+                        help="e.g. wikitext-103-raw-v1 for the ~50x corpus")
+    parser.add_argument("--impls", default=",".join(IMPLS),
+                        help="comma-separated subset of implementations to run")
     parser.add_argument("--case", choices=CASES, help=argparse.SUPPRESS)  # subprocess mode
     parser.add_argument("--impl", choices=IMPLS, help=argparse.SUPPRESS)
     parser.add_argument("--texts-file", help=argparse.SUPPRESS)
@@ -74,11 +78,13 @@ if __name__ == "__main__":
         impls = IMPLS
     except ImportError:
         impls = IMPLS[:-1]
+    impls = [i for i in impls if i in args.impls.split(",")]
 
     # Load the corpus once and hand it to subprocesses through a file:
     # importing datasets and streaming rows costs seconds per subprocess.
     from tests.utils import text_dataset
-    texts = [t for t in text_dataset(max_samples=args.samples or None) if t.strip()]
+    texts = [t for t in text_dataset(max_samples=args.samples or None,
+                                     dataset_config=args.dataset_config) if t.strip()]
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
         f.write("\x00".join(texts))
         texts_file = f.name
